@@ -1,0 +1,49 @@
+cff-version: 1.2.0
+message: "Se usi Kite, citalo come indicato qui. / If you use Kite, please cite it as below."
+type: software
+title: "Kite: hybrid gaze keyboard for augmentative and alternative communication"
+abstract: >-
+  Kite is an open on-screen gaze keyboard for augmentative and alternative
+  communication, for Linux, with the Tobii Eye Tracker 4C. A key fires when
+  the gaze settles after the saccade that brings it there, after a time that
+  depends on how likely the letter is; likely keys invisibly grow their hit
+  areas through Bayesian decoding; the pupil, compensated for screen
+  luminance, estimates cognitive load and can lengthen the timing. It includes
+  an Italian corrector, local neural speech output and learned phrases. Gaze
+  data come from the tobii4c-linux driver.
+authors:
+  - family-names: Blescia
+    given-names: Antonio
+license: AGPL-3.0-or-later
+repository-code: "https://github.com/ablescia/kite"
+url: "https://smartchair.it/ricerche/kite/"
+keywords:
+  - eye tracking
+  - gaze typing
+  - dwell time
+  - augmentative and alternative communication
+  - assistive technology
+  - pupillometry
+  - Tobii Eye Tracker 4C
+# La versione non è indicata: Zenodo la prende dal tag della release.
+# Dopo la prima release su Zenodo si può aggiungere il DOI del software
+# (quello di tutte le versioni) in "doi:".
+references:
+  - type: report
+    title: "Probabilistic gaze typing with saccade-anchored adaptive dwell, corrective-saccade-aware selection, luminance-compensated pupillometry and gaze-aware correction"
+    authors:
+      - family-names: Blescia
+        given-names: Antonio
+    year: 2026
+    version: "1.0"
+    publisher:
+      name: Zenodo
+    doi: "10.5281/zenodo.24282465"
+    license: CC-BY-4.0
+  - type: software
+    title: "tobii4c-linux: user-space driver for the Tobii Eye Tracker 4C"
+    authors:
+      - family-names: Blescia
+        given-names: Antonio
+    repository-code: "https://github.com/ablescia/tobii4c-linux"
+    license: MIT
