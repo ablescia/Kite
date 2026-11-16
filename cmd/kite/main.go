@@ -24,7 +24,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -252,10 +251,11 @@ func run() error {
 	hp.PupilGain = *pupilGain
 	model := lm.New()
 	cfgDir, _ := os.UserConfigDir()
-	if !*simulate {
-		importBench(cfgDir)
-	}
 	wordsPath := filepath.Join(cfgDir, appName, "parole.txt")
+	phrasesPath := filepath.Join(cfgDir, appName, "frasi.txt")
+	if !*simulate {
+		createEmpty(wordsPath, phrasesPath)
+	}
 	userWords := 0
 	if !*simulate {
 		userWords = loadWords(model, wordsPath)
@@ -263,7 +263,6 @@ func run() error {
 	cp := correct.DefaultParams()
 	corr := correct.New(cp, model)
 	// Frasi imparate: ogni riga è un messaggio detto, le ripetizioni contano.
-	phrasesPath := filepath.Join(cfgDir, appName, "frasi.txt")
 	var phrases *ngram.Model
 	if !*noPhrases {
 		pp := ngram.DefaultParams()
@@ -369,38 +368,21 @@ func run() error {
 	return err
 }
 
-// importBench copia nella cartella di Kite il dizionario personale, le
-// frasi imparate e il modello della pupilla del banco di prova da cui Kite
-// nasce (~/.config/tobii4c-hybridbci), se Kite non ha ancora i suoi. Gli
-// originali restano dove sono.
-func importBench(cfgDir string) {
-	for _, name := range []string{"parole.txt", "frasi.txt", "pupil-model.json"} {
-		dst := filepath.Join(cfgDir, appName, name)
-		if _, err := os.Stat(dst); err == nil {
-			continue
-		}
-		src, err := os.Open(filepath.Join(cfgDir, "tobii4c-hybridbci", name))
-		if err != nil {
-			continue
-		}
-		err = os.MkdirAll(filepath.Dir(dst), 0o755)
-		var out *os.File
+// createEmpty crea vuoti i file indicati che non esistono ancora (il
+// dizionario personale e le frasi imparate): al primo avvio Kite parte senza
+// parole né frasi. Un file che esiste già non viene toccato.
+func createEmpty(paths ...string) {
+	for _, p := range paths {
+		err := os.MkdirAll(filepath.Dir(p), 0o755)
 		if err == nil {
-			out, err = os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-		}
-		if err == nil {
-			_, err = io.Copy(out, src)
-			if cerr := out.Close(); err == nil {
-				err = cerr
+			var f *os.File
+			if f, err = os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644); err == nil {
+				err = f.Close()
 			}
 		}
-		src.Close()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "kite: %s non importato dal banco di prova: %v\n", name, err)
-			os.Remove(dst)
-			continue
+		if err != nil && !errors.Is(err, os.ErrExist) {
+			fmt.Fprintf(os.Stderr, "kite: %s: %v\n", p, err)
 		}
-		fmt.Fprintf(os.Stderr, "kite: %s importato dal banco di prova (%s)\n", name, dst)
 	}
 }
 
