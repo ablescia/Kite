@@ -21,6 +21,9 @@ import (
 // non riesce a parlare, il testo resta. Cancella subito dopo la voce
 // ripristina il testo detto.
 //
+// Quando la voce finisce, o viene fermata, la tastiera si riarma: lo sguardo
+// che è già fermo su un tasto non lo scrive subito (selector.Armer).
+//
 // Il tasto parla è acceso solo nella scrittura libera: nell'esercizio di
 // copiatura cancellerebbe il testo da misurare.
 
@@ -89,6 +92,7 @@ func (e *Engine) voiceDone(id uint64, err error) {
 		}
 	}
 	e.cfg.Log.Event("speech_end", ev)
+	e.rearm()
 	e.recomputePrior()
 	e.syncTask()
 }
@@ -101,6 +105,7 @@ func (e *Engine) stopVoice(outcome string) {
 	e.voice.cancel()
 	e.voice.on = false
 	e.cfg.Log.Event("speech_end", map[string]any{"outcome": outcome, "dur_ms": time.Since(e.voice.start).Milliseconds()})
+	e.rearm()
 }
 
 // armVoice accende stop quando lo sguardo esce dal tasto parla.

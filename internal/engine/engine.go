@@ -59,17 +59,19 @@ const CondHybrid = "B"
 
 // Config configura l'engine.
 type Config struct {
-	Geom      gazein.Geometry
-	KB        *selector.Keyboard
-	LM        *lm.Model
-	Oculo     oculo.Config
-	Hybrid    selector.HybridParams
-	SigmaDeg  float64 // dispersione dello sguardo nel decoder
-	CoreFrac  float64 // nucleo ancorato dei tasti
-	PriorEps  float64 // quota uniforme mescolata al modello di lingua
-	LumAlpha  float64 // peso della zona foveale nella luminanza efficace
-	FovealDeg float64 // raggio della zona foveale
-	Log       *Logger
+	Geom     gazein.Geometry
+	KB       *selector.Keyboard
+	LM       *lm.Model
+	Oculo    oculo.Config
+	Hybrid   selector.HybridParams
+	SigmaDeg float64 // dispersione dello sguardo nel decoder
+	CoreFrac float64 // nucleo ancorato dei tasti
+	// tolleranza dei tasti di modifica fuori dal tasto (gradi; 0 = solo dentro)
+	EditMarginDeg float64
+	PriorEps      float64 // quota uniforme mescolata al modello di lingua
+	LumAlpha      float64 // peso della zona foveale nella luminanza efficace
+	FovealDeg     float64 // raggio della zona foveale
+	Log           *Logger
 
 	// Correttore italiano (nil: nessuno). Si usa negli esercizi del compito
 	// "testo" e nella scrittura libera, se acceso (SetToggles).
@@ -267,7 +269,8 @@ func (e *Engine) Events() <-chan Event { return e.events }
 // in un'altra goroutine (per disegnare le aree di tocco): quello dell'engine
 // ha un buffer di lavoro e non va condiviso.
 func (e *Engine) Decoder() *selector.Decoder {
-	return &selector.Decoder{KB: e.cfg.KB, Geom: e.cfg.Geom, SigmaDeg: e.cfg.SigmaDeg, CoreFrac: e.cfg.CoreFrac, MarginDeg: 1}
+	return &selector.Decoder{KB: e.cfg.KB, Geom: e.cfg.Geom, SigmaDeg: e.cfg.SigmaDeg, CoreFrac: e.cfg.CoreFrac, MarginDeg: 1,
+		EditMarginDeg: e.cfg.EditMarginDeg}
 }
 
 // Run elabora i campioni finché ctx non termina.
@@ -393,11 +396,12 @@ func (e *Engine) Process(s gazein.Sample) {
 
 	// 4. log e stato per l'interfaccia
 	if e.cfg.Log != nil {
-		e.cfg.Log.Samplef("%d,%d,%d,%s,%d,%.5f,%.5f,%d,%.5f,%.5f,%d,%.3f,%.3f,%d,%d,%.1f,%.1f,%.1f,%s,%.1f,%.1f,%.1f,%d,%.5f,%.5f,%.3f,%d,%d,%.3f,%.0f,%d,%.4f,%.4f,%.4f,%.3f,%d,%.4f,%.4f\n",
+		e.cfg.Log.Samplef("%d,%d,%d,%s,%d,%.5f,%.5f,%d,%.5f,%.5f,%d,%.3f,%.3f,%d,%d,%.1f,%.1f,%.1f,%s,%.1f,%.1f,%.1f,%d,%.5f,%.5f,%.3f,%d,%d,%.3f,%.0f,%d,%.4f,%.4f,%.4f,%.3f,%d,%.4f,%.4f,%d,%s\n",
 			s.HostNs, s.DeviceUs, s.Seq, e.mode, e.blockID, s.Gaze[0], s.Gaze[1], b2i(s.GazeValid), s.Raw[0], s.Raw[1], b2i(s.RawValid),
 			s.PupilMM[0], s.PupilMM[1], b2i(s.PupilValid[0]), b2i(s.PupilValid[1]), e.eye[0], e.eye[1], e.eye[2],
 			st.Phase, st.VelDeg, st.PeakThr, st.OnsetThr, st.FixID, st.FixCentroid[0], st.FixCentroid[1], st.FixRMSDeg, b2i(st.FixStable),
-			dec.Candidate, dec.Progress, dec.RequiredMs, dec.Selected, po.MeasMM, nan0(po.PredMM), po.ResidMM, po.Z, b2i(po.Valid), lumEff, e.lum.Mean)
+			dec.Candidate, dec.Progress, dec.RequiredMs, dec.Selected, po.MeasMM, nan0(po.PredMM), po.ResidMM, po.Z, b2i(po.Valid), lumEff, e.lum.Mean,
+			b2i(st.Drift), dec.Wait)
 	}
 	sn := &e.snap
 	sn.Samples++
@@ -799,13 +803,33 @@ func (e *Engine) corrector() *correct.Corrector {
 	return nil
 }
 
-func (e *Engine) newHybrid() selector.Selector {
+// newHybrid crea il selettore con le componenti attive e ne restituisce i
+// parametri, che si registrano all'inizio del blocco o della scrittura
+// libera: i tempi possono cambiare durante la sessione (SetTiming).
+func (e *Engine) newHybrid() (selector.Selector, selector.HybridParams) {
 	p := e.cfg.Hybrid
 	p.UsePrediction = e.usePred
 	if !e.usePupil {
 		p.PupilGain = 0
 	}
-	return selector.NewHybrid(p, e.dec)
+	return selector.NewHybrid(p, e.dec), p
+}
+
+// rearm riarma il selettore quando la tastiera torna attiva dopo una pausa
+// (la voce ha finito o è stata fermata): lo sguardo già fermo su un tasto
+// non lo scrive subito.
+func (e *Engine) rearm() {
+	if a, ok := e.sel.(selector.Armer); ok {
+		a.Rearm()
+	}
+}
+
+// SetTiming cambia i tempi delle lettere (TMinMs e TMaxMs del selettore
+// ibrido), dal blocco o dalla scrittura libera successivi.
+func (e *Engine) SetTiming(tminMs, tmaxMs float64) {
+	e.mu.Lock()
+	e.cfg.Hybrid.TMinMs, e.cfg.Hybrid.TMaxMs = tminMs, tmaxMs
+	e.mu.Unlock()
 }
 
 // StartBlock avvia un blocco dell'esercizio di copiatura e ne restituisce
@@ -823,7 +847,8 @@ func (e *Engine) StartBlock(phrase string) int {
 	}
 	e.ed = nil
 	var corr *correct.Corrector
-	e.sel = e.newHybrid()
+	var hp selector.HybridParams
+	e.sel, hp = e.newHybrid()
 	if e.task == metrics.TaskText {
 		corr = e.corrector()
 		e.ed = newEditor(corr, selector.NumSuggest, nil)
@@ -835,7 +860,7 @@ func (e *Engine) StartBlock(phrase string) int {
 	e.lastSel.key = -1
 	e.recomputePrior()
 	e.cfg.Log.Event("block_start", map[string]any{"block": e.blockID, "cond": e.cond, "label": e.label, "phrase": phrase,
-		"pupil_compensated": e.model.Valid(), "task": e.task, "corrector": corr != nil})
+		"pupil_compensated": e.model.Valid(), "task": e.task, "corrector": corr != nil, "hybrid": hp})
 	e.syncTask()
 	return e.blockID
 }
@@ -859,8 +884,11 @@ func (e *Engine) StartFree() {
 	e.stopVoice("interrotta")
 	e.voice.said = ""
 	e.mode, e.cond = ModeFree, CondHybrid
-	e.sel = e.newHybrid()
+	var hp selector.HybridParams
+	e.sel, hp = e.newHybrid()
 	e.label = HybridLabel(e.usePred, e.usePupil, e.corrector() != nil)
+	e.cfg.Log.Event("free_start", map[string]any{"dev_us": e.lastDev, "label": e.label,
+		"pupil_compensated": e.model.Valid(), "hybrid": hp})
 	e.ed = newEditor(e.corrector(), selector.NumSuggest, e.cfg.Phrases)
 	e.task = ""
 	e.target, e.typed, e.pos, e.errors, e.nsel = nil, nil, 0, 0, 0

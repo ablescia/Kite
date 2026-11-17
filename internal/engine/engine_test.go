@@ -198,7 +198,8 @@ func TestFreeWritingVoiceByGaze(t *testing.T) {
 		}
 	}
 
-	g.look(key(selector.KeySpeak), time.Second)
+	// parla chiede SpeakMs (1 s): lo sguardo resta 1,3 s
+	g.look(key(selector.KeySpeak), 1300*time.Millisecond)
 	if got := said(); got != "ciao" {
 		t.Fatalf("parla con lo sguardo: la voce ha ricevuto %q", got)
 	}
@@ -207,13 +208,13 @@ func TestFreeWritingVoiceByGaze(t *testing.T) {
 	if s := e.Snapshot(); !s.Speaking || s.Typed != "ciao " {
 		t.Fatalf("mentre parla: voce %v, testo %q", s.Speaking, s.Typed)
 	}
-	g.look(key(selector.KeySpeak), time.Second) // stop
+	g.look(key(selector.KeySpeak), 1300*time.Millisecond) // stop
 	if s := e.Snapshot(); s.Speaking || s.Typed != "ciao " {
 		t.Fatalf("dopo stop: voce %v, testo %q", s.Speaking, s.Typed)
 	}
 
 	g.look(strip, 500*time.Millisecond)
-	g.look(key(selector.KeySpeak), time.Second)
+	g.look(key(selector.KeySpeak), 1300*time.Millisecond)
 	if got := said(); got != "ciao" {
 		t.Fatalf("di nuovo parla: %q", got)
 	}
@@ -223,5 +224,53 @@ func TestFreeWritingVoiceByGaze(t *testing.T) {
 	}
 	if s := e.Snapshot(); s.Speaking || s.Typed != "" || s.Said != "ciao" {
 		t.Errorf("a voce finita: voce %v, testo %q, detto %q", s.Speaking, s.Typed, s.Said)
+	}
+}
+
+// A voce finita la tastiera si riarma: lo sguardo fermo su una lettera
+// mentre la voce parlava non la scrive appena la voce tace, ma solo dopo la
+// prudenza dell'armamento (prima scattava subito: la fissazione era già
+// lunga).
+func TestVoiceEndRearms(t *testing.T) {
+	kb, err := selector.NewKeyboard("qwerty", selector.DefaultArea, selector.DefaultGap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kb.AddEditBar(selector.DefaultBar, selector.DefaultGap, true)
+	model := lm.New()
+	sp := &gazeSpeaker{said: make(chan string, 4), finish: make(chan error, 1)}
+	hp := selector.DefaultHybrid()
+	e := engine.New(engine.Config{Geom: geom, KB: kb, LM: model, Oculo: oculo.DefaultConfig(),
+		Hybrid: hp, SigmaDeg: 1.6, CoreFrac: 0.6, PriorEps: 0.1,
+		LumAlpha: 0.3, FovealDeg: 5, Corrector: correct.New(correct.DefaultParams(), model), Speaker: sp})
+	e.StartFree()
+	key := func(c rune) [2]float64 { return kb.Keys[kb.IndexOf(c)].Center }
+	strip := [2]float64{0.5, 0.12}
+	g := &gazer{e: e, at: strip}
+	g.look(strip, time.Second)
+	for _, c := range "ciao" {
+		g.look(key(c), 750*time.Millisecond)
+	}
+	g.look(key(selector.KeySpeak), 1300*time.Millisecond)
+	select {
+	case <-sp.said:
+	case <-time.After(time.Second):
+		t.Fatal("la voce non è partita")
+	}
+	g.look(key('e'), 1500*time.Millisecond) // mentre la voce parla, lo sguardo resta sulla E
+	sp.finish <- nil
+	for i := 0; i < 200 && e.Snapshot().Speaking; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if s := e.Snapshot(); s.Speaking || s.Typed != "" {
+		t.Fatalf("a voce finita: voce %v, testo %q", s.Speaking, s.Typed)
+	}
+	g.look(key('e'), 300*time.Millisecond) // stessa fissazione: nessuna saccade
+	if s := e.Snapshot(); s.Typed != "" {
+		t.Errorf("300 ms dopo la fine della voce la E non deve essere scritta: %q", s.Typed)
+	}
+	g.look(key('e'), 700*time.Millisecond)
+	if s := e.Snapshot(); s.Typed != "e" {
+		t.Errorf("dopo la prudenza dell'armamento la E si scrive: %q", s.Typed)
 	}
 }

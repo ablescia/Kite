@@ -19,7 +19,7 @@ spesso 1 s, e il tasto si attiva. Kite fa diversamente:
 
 - il tasto si attiva **appena lo sguardo si ferma dopo la saccade** che lo
   porta sul tasto, prima se la lettera è probabile in quel punto della
-  parola, più tardi se è improbabile;
+  parola (0,2 s), più tardi se è improbabile (fino a 1 s);
 - le aree di tocco dei tasti probabili **si allargano in modo invisibile**;
 - la **pupilla**, compensata per la luminanza dello schermo, stima il carico
   cognitivo e può allungare i tempi.
@@ -102,6 +102,63 @@ sguardo.
 Senza tracker: `./bin/kite -simulate`. Senza finestra: `make demo` esegue
 l'esercizio con l'utente simulato in headless e salva gli screenshot in
 `/tmp/kite-demo`.
+
+## I tempi e le protezioni contro gli scatti involontari
+
+Con lo sguardo non c'è un modo di «non premere»: ogni occhiata a un tasto è
+una pressione possibile. Kite usa tempi brevi per le lettere probabili, ma
+non così brevi da scrivere ciò che si guarda solo per cercarlo. Una normale
+fissazione di ricerca dura 0,2–0,3 s, e per reagire al cerchio di
+avanzamento e distogliere lo sguardo ne servono circa 0,2.
+
+**Velocità** (tasto **V** del menu, oppure `-speed`). La scelta resta per le
+sessioni successive (`~/.config/kite/impostazioni.json`).
+
+| preset | lettera probabile | lettera improbabile |
+|---|---|---|
+| veloce | 0,2 s | 0,8 s |
+| normale (predefinito) | 0,2 s | 1 s |
+| prudente | 0,25 s | 1,1 s |
+
+`-tmin` e `-tmax`, se indicati, sostituiscono il preset. Rigiocando le
+sessioni registrate a novembre 2026 (`kite-replay`, sotto), il preset normale
+porta le lettere poi cancellate nella scrittura libera da 76 a 30 su circa
+800, rispetto ai tempi di prima (0,12–0,7 s). Costa circa 0,1 s per lettera,
+ma un errore costa in mediana 3,9 s tra vederlo e cancellarlo.
+
+**Protezioni** (sempre attive):
+
+- **armamento**: quando la tastiera compare, o torna attiva a voce finita, lo
+  sguardo che è già fermo su un tasto non lo scrive subito. Il tempo si conta
+  da quell'istante e la prima selezione chiede almeno 0,5 s;
+- **tasti di modifica a tempo proprio**: cancella e i suggerimenti 0,7 s,
+  parla 1 s (`-edit`, `-speak`), indipendenti dalla velocità delle lettere.
+  Cancella tenuto con lo sguardo si ripete ogni secondo;
+- **doppie**: una doppia probabile («gg» in «oggi») si scrive tenendo il
+  tasto; una improbabile («bb») no, perché lo sguardo fermo è quasi sempre
+  una pausa per pensare: si esce dal tasto e si rientra. Il correttore
+  ripristina comunque le doppie saltate;
+- **mira della saccade**: se la saccade puntava chiaramente a un altro tasto
+  e lo sguardo è finito su una lettera per strada, o nell'area allargata di
+  una lettera probabile, quella lettera chiede il tempo massimo;
+- **sguardo che scivola**: se l'occhio scivola lentamente senza una saccade,
+  il conteggio riparte da capo e il cerchio torna vuoto, invece di restare
+  pieno senza poter scattare. Su cancella, i suggerimenti e parla conta il
+  punto in cui lo sguardo si è fermato adesso.
+
+`-edit-margin 0.4` (sperimentale, spento per default) fa accettare ai tasti
+di modifica anche lo sguardo fino a 0,4° fuori dal bordo: con uno scarto
+verticale della calibrazione, lo sguardo su cancella cade spesso appena sopra
+il tasto.
+
+Nella diagnostica (tasto **D**) la riga in alto dice perché il tasto guardato
+non scatta ancora (`attesa: …`), e lo stesso motivo finisce nella colonna
+`wait` di `samples.csv`.
+
+**Verificare una modifica sui dati reali**: `kite-replay` rigioca tutte le
+sessioni registrate, scrittura libera compresa (le lettere poi cancellate
+contano come errori), con i parametri di allora e con quelli attuali;
+`kite-replay -suite` mostra il contributo di ogni correzione.
 
 ## Il driver: tobii4c-linux
 

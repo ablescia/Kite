@@ -86,8 +86,17 @@ func run() error {
 	blocks := flag.Int("blocks", 3, "frasi da copiare nell'esercizio")
 	layout := flag.String("layout", "qwerty", "disposizione dei tasti: qwerty (righe sfalsate e barra spaziatrice), abc (griglia alfabetica)")
 	dh := selector.DefaultHybrid()
-	tmin := flag.Duration("tmin", dur(dh.TMinMs), "fissazione minima dopo la saccade (tasto molto probabile)")
-	tmax := flag.Duration("tmax", dur(dh.TMaxMs), "fissazione massima (tasto improbabile o sguardo ambiguo)")
+	speedNames := make([]string, len(selector.Speeds))
+	for i, s := range selector.Speeds {
+		speedNames[i] = fmt.Sprintf("%s (%.0f–%.0f ms)", s.Name, s.TMinMs, s.TMaxMs)
+	}
+	speed := flag.String("speed", "", "tempi delle lettere: "+strings.Join(speedNames, ", ")+
+		"; default quello scelto nel menu (tasto V), poi "+selector.DefaultSpeed)
+	tmin := flag.Duration("tmin", dur(dh.TMinMs), "fissazione minima dopo la saccade (lettera molto probabile); se indicato sostituisce il preset")
+	tmax := flag.Duration("tmax", dur(dh.TMaxMs), "fissazione massima (lettera improbabile o sguardo ambiguo); se indicato sostituisce il preset")
+	editDwell := flag.Duration("edit", dur(dh.EditMs), "fissazione per cancella e i suggerimenti")
+	speakDwell := flag.Duration("speak", dur(dh.SpeakMs), "fissazione per parla (e stop)")
+	editMargin := flag.Float64("edit-margin", 0, "tolleranza in gradi dello sguardo appena fuori dai tasti di modifica (0 = solo dentro; da provare: 0.4)")
 	repeat := flag.Duration("repeat", dur(dh.RepeatMs), "ripetere la lettera tenendo il tasto, doppia improbabile")
 	repeatMin := flag.Duration("repeat-min", dur(dh.RepeatMinMs), "ripetere la lettera tenendo il tasto, doppia probabile (0 = sempre -repeat)")
 	land := flag.Duration("land", dur(dh.LandMs), "attesa minima dopo un atterraggio forse corto, per la saccade correttiva (0 = spento)")
@@ -120,9 +129,9 @@ func run() error {
 	if *seed == 0 {
 		*seed = uint64(time.Now().UnixNano())
 	}
-	sayGiven := false
-	flag.Visit(func(f *flag.Flag) { sayGiven = sayGiven || f.Name == "say" })
-	if sayGiven && strings.TrimSpace(*say) == "" {
+	given := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	if given["say"] && strings.TrimSpace(*say) == "" {
 		return fmt.Errorf("-say: manca il testo da dire")
 	}
 	if *voiceSpeed <= 0 {
@@ -136,6 +145,9 @@ func run() error {
 	}
 	if *blocks < 1 || *words < 1 {
 		return fmt.Errorf("-blocks e -words: almeno 1")
+	}
+	if *editMargin < 0 || *editMargin > 1 {
+		return fmt.Errorf("-edit-margin: %g (tra 0 e 1 grado)", *editMargin)
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -245,12 +257,46 @@ func run() error {
 	}
 	defer log.Close()
 
+	cfgDir, _ := os.UserConfigDir()
+	// Tempi delle lettere: il preset di -speed, o quello scelto nel menu e
+	// salvato; -tmin e -tmax, se indicati, lo sostituiscono.
+	settingsPath := filepath.Join(cfgDir, appName, "impostazioni.json")
+	if *simulate {
+		settingsPath = "" // le scelte di un utente simulato non vanno salvate
+	}
+	speedName := *speed
+	if speedName == "" {
+		speedName = app.LoadSettings(settingsPath).Speed
+	}
+	sp, ok := selector.SpeedByName(speedName)
+	if !ok {
+		if *speed != "" {
+			return fmt.Errorf("-speed: %q (%s)", *speed, strings.Join(speedNames, ", "))
+		}
+		if speedName != "" {
+			fmt.Fprintf(os.Stderr, "impostazioni: velocità %q sconosciuta, uso %s\n", speedName, selector.DefaultSpeed)
+		}
+		sp, _ = selector.SpeedByName(selector.DefaultSpeed)
+	}
 	hp := dh
-	hp.TMinMs, hp.TMaxMs, hp.RepeatMs, hp.RepeatMinMs = ms(*tmin), ms(*tmax), ms(*repeat), ms(*repeatMin)
+	hp.TMinMs, hp.TMaxMs = sp.TMinMs, sp.TMaxMs
+	if given["tmin"] || given["tmax"] {
+		if given["tmin"] {
+			hp.TMinMs = ms(*tmin)
+		}
+		if given["tmax"] {
+			hp.TMaxMs = ms(*tmax)
+		}
+		sp.Name = ""
+	}
+	if hp.TMinMs <= 0 || hp.TMaxMs < hp.TMinMs {
+		return fmt.Errorf("-tmin %s, -tmax %s: serve 0 < tmin ≤ tmax", dur(hp.TMinMs), dur(hp.TMaxMs))
+	}
+	hp.RepeatMs, hp.RepeatMinMs = ms(*repeat), ms(*repeatMin)
 	hp.LandMs, hp.CautionMs = ms(*land), ms(*caution)
+	hp.EditMs, hp.SpeakMs = ms(*editDwell), ms(*speakDwell)
 	hp.PupilGain = *pupilGain
 	model := lm.New()
-	cfgDir, _ := os.UserConfigDir()
 	wordsPath := filepath.Join(cfgDir, appName, "parole.txt")
 	phrasesPath := filepath.Join(cfgDir, appName, "frasi.txt")
 	if !*simulate {
@@ -279,7 +325,7 @@ func run() error {
 		speaker, voiceInfo = voice, voice.Name()
 	}
 	eng := engine.New(engine.Config{Geom: geom, KB: kb, LM: model, Oculo: oculo.DefaultConfig(), Hybrid: hp,
-		SigmaDeg: *sigma, CoreFrac: *core, PriorEps: *eps, LumAlpha: *lumAlpha, FovealDeg: 5,
+		SigmaDeg: *sigma, CoreFrac: *core, EditMarginDeg: *editMargin, PriorEps: *eps, LumAlpha: *lumAlpha, FovealDeg: 5,
 		Log: log, Corrector: corr, Task: *task, Speaker: speaker, Phrases: phrases, PhraseDwellMs: ms(*phraseDwell)})
 
 	modelPath := filepath.Join(cfgDir, appName, "pupil-model.json")
@@ -315,7 +361,7 @@ func run() error {
 	}
 	a.Eng, a.Geom, a.KB, a.LM, a.Log = eng, geom, kb, model, log
 	a.ModelPath, a.Source, a.UDPStats, a.ShotDir = modelPath, source, &stats, *shots
-	a.Task, a.WordsPath, a.PhrasesPath = *task, wordsPath, phrasesPath
+	a.Task, a.WordsPath, a.PhrasesPath, a.SettingsPath = *task, wordsPath, phrasesPath, settingsPath
 	a.VoiceInfo, a.VoiceErr = voiceInfo, voiceErr
 	a.Driver, a.Monitor, a.GeomDriver = *driverExe, monName, *dispMM == ""
 	if *headless {
@@ -325,7 +371,7 @@ func run() error {
 		a.ModelPath, a.WordsPath, a.PhrasesPath = "", "", "" // modello, parole e frasi di un utente simulato non vanno salvati
 	}
 	a.Opt = app.Options{Words: *words, Blocks: *blocks, UsePrediction: !*noPred, UsePupil: !*noPupil, UseCorrector: !*noCorrect,
-		UsePhrases: phrases != nil, Debug: *debug, Auto: *auto, Seed: *seed}
+		UsePhrases: phrases != nil, Speed: sp.Name, TMinMs: hp.TMinMs, TMaxMs: hp.TMaxMs, Debug: *debug, Auto: *auto, Seed: *seed}
 	if *shots != "" {
 		if err := os.MkdirAll(*shots, 0o755); err != nil {
 			return err
@@ -333,7 +379,8 @@ func run() error {
 	}
 	log.WriteJSON("session.json", map[string]any{
 		"program": appName, "started": time.Now(), "source": source, "monitor": monName, "geometry": geom, "layout": *layout,
-		"keys": len(kb.Keys), "hybrid": hp, "sigma_deg": *sigma, "core": *core, "eps": *eps,
+		"keys": len(kb.Keys), "hybrid": hp, "speed": sp.Name, "sigma_deg": *sigma, "core": *core, "eps": *eps,
+		"edit_margin_deg": *editMargin, "window_samples": oculo.DefaultConfig().WindowSamples,
 		"lum_fovea": *lumAlpha, "words": *words, "blocks": *blocks, "seed": *seed, "lexicon_words": model.Words(), "lm": model.Name(),
 		"task": *task, "area": kb.Area, "bar": kb.Bar, "gap": selector.DefaultGap, "edit_bar": kb.HasEditBar(),
 		"corrector": cp, "user_words": userWords, "speak_key": true, "voice": voiceInfo, "voice_speed": *voiceSpeed,

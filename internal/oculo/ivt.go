@@ -14,6 +14,12 @@
 // quando la velocità su due intervalli (22 ms) scende sotto la soglia di
 // fine: da quell'istante parte la nuova fissazione, che è "stabile" dopo
 // StableSamples campioni con dispersione contenuta.
+//
+// Centroide e dispersione si misurano su tutta la fissazione. Se l'occhio
+// scivola lentamente, senza una saccade, la dispersione supera la soglia e la
+// fissazione resta instabile fino alla saccade successiva (Drift). Per questi
+// casi lo stato riporta anche centroide e dispersione degli ultimi
+// WindowSamples campioni: dicono dove lo sguardo si è fermato adesso.
 package oculo
 
 import (
@@ -51,6 +57,7 @@ type Config struct {
 	GapMaxMs         float64 // buco di campioni oltre il quale lo sguardo è perso
 	StableSamples    int     // campioni minimi per una fissazione stabile
 	StableRMSDeg     float64 // dispersione RMS massima di una fissazione stabile
+	WindowSamples    int     // campioni della finestra recente (0 = nessuna; al più 32)
 }
 
 // DefaultConfig: valori tipici per 90 Hz.
@@ -58,7 +65,7 @@ func DefaultConfig() Config {
 	return Config{
 		PeakMin: 60, PeakMax: 300, PeakK: 6, OnsetK: 3, NoiseTauS: 2,
 		MinAmplitudeDeg: 1.0, MaxSaccadeMs: 160, GapMaxMs: 100,
-		StableSamples: 3, StableRMSDeg: 1.0,
+		StableSamples: 3, StableRMSDeg: 1.0, WindowSamples: 8,
 	}
 }
 
@@ -86,6 +93,15 @@ type State struct {
 	FixRMSDeg    float64    // dispersione RMS attorno al centroide
 	FixStable    bool
 	AfterSaccade bool // la fissazione segue una saccade (non un ammiccamento o una perdita)
+
+	// Drift: la fissazione ha abbastanza campioni ma la dispersione supera
+	// StableRMSDeg (lo sguardo è scivolato senza una saccade). Resta così
+	// fino alla saccade successiva.
+	Drift bool
+	// Finestra recente: gli ultimi WindowSamples campioni della fissazione.
+	WinCentroid [2]float64
+	WinRMSDeg   float64
+	WinStable   bool // almeno StableSamples campioni e dispersione entro StableRMSDeg
 
 	Last SaccadeInfo // ultima saccade conclusa
 }
@@ -136,6 +152,9 @@ type Detector struct {
 	sacFrom    [2]float64
 	sacPeak    float64
 
+	win    [32][2]float64 // finestra recente della fissazione (normalizzata), circolare
+	nw, hw int
+
 	events []Event
 }
 
@@ -173,6 +192,7 @@ func (d *Detector) push(t int64, p [2]float64) {
 
 func (d *Detector) resetFix() {
 	d.sx, d.sy, d.sxx, d.syy, d.su, d.sv, d.n = 0, 0, 0, 0, 0, 0, 0
+	d.nw, d.hw = 0, 0
 }
 
 func (d *Detector) addFix(p [2]float64, eye [3]float64) {
@@ -190,6 +210,43 @@ func (d *Detector) addFix(p [2]float64, eye [3]float64) {
 	vx := d.sxx/n - (d.sx/n)*(d.sx/n)
 	vy := d.syy/n - (d.sy/n)*(d.sy/n)
 	d.st.FixRMSDeg = math.Sqrt(math.Max(vx+vy, 0)) / d.geom.MMPerDeg(eye)
+	d.addWindow(p, eye)
+}
+
+// addWindow aggiunge p alla finestra recente e ne aggiorna centroide e
+// dispersione.
+func (d *Detector) addWindow(p [2]float64, eye [3]float64) {
+	w := min(d.cfg.WindowSamples, len(d.win))
+	if w <= 0 {
+		return
+	}
+	d.win[d.hw] = p
+	d.hw = (d.hw + 1) % w
+	d.nw = min(d.nw+1, w)
+	var su, sv, sx, sy, sxx, syy float64
+	for i := 0; i < d.nw; i++ {
+		q := d.win[i]
+		m := d.geom.ToMM(q)
+		su += q[0]
+		sv += q[1]
+		sx += m[0]
+		sy += m[1]
+		sxx += m[0] * m[0]
+		syy += m[1] * m[1]
+	}
+	n := float64(d.nw)
+	d.st.WinCentroid = [2]float64{su / n, sv / n}
+	vx := sxx/n - (sx/n)*(sx/n)
+	vy := syy/n - (sy/n)*(sy/n)
+	d.st.WinRMSDeg = math.Sqrt(math.Max(vx+vy, 0)) / d.geom.MMPerDeg(eye)
+}
+
+// settle aggiorna gli indicatori di stabilità dopo un campione.
+func (d *Detector) settle() {
+	fix := d.st.Phase == Fixation && d.n >= d.cfg.StableSamples
+	d.st.FixStable = fix && d.st.FixRMSDeg <= d.cfg.StableRMSDeg
+	d.st.Drift = fix && d.st.FixRMSDeg > d.cfg.StableRMSDeg
+	d.st.WinStable = d.st.Phase == Fixation && d.nw >= d.cfg.StableSamples && d.st.WinRMSDeg <= d.cfg.StableRMSDeg
 }
 
 // startFixation apre una nuova fissazione con i campioni di atterraggio.
@@ -212,7 +269,8 @@ func (d *Detector) Update(tUs int64, p [2]float64, valid bool, eye [3]float64) (
 	gapMax := int64(d.cfg.GapMaxMs * 1000)
 	if !valid {
 		if d.st.Phase != Lost && d.seen && tUs-d.lastValidUs > gapMax {
-			d.st.Phase, d.st.FixStable, d.st.VelDeg = Lost, false, 0
+			d.st.Phase, d.st.VelDeg = Lost, 0
+			d.settle()
 			d.nh = 0
 			d.emit(Event{Kind: EvLost, TUs: tUs})
 		}
@@ -226,7 +284,7 @@ func (d *Detector) Update(tUs int64, p [2]float64, valid bool, eye [3]float64) (
 		d.push(tUs, p)
 		d.st.VelDeg = 0
 		d.startFixation(tUs, d.hist[:1], eye, false)
-		d.st.FixStable = false
+		d.settle()
 		return d.st, d.events
 	}
 	d.lastValidUs = tUs
@@ -309,6 +367,6 @@ func (d *Detector) Update(tUs int64, p [2]float64, valid bool, eye [3]float64) (
 		d.emit(Event{Kind: EvSaccadeEnd, TUs: sac.EndUs, Sac: sac})
 		d.startFixation(sac.EndUs, landing, eye, true)
 	}
-	d.st.FixStable = d.st.Phase == Fixation && d.n >= d.cfg.StableSamples && d.st.FixRMSDeg <= d.cfg.StableRMSDeg
+	d.settle()
 	return d.st, d.events
 }

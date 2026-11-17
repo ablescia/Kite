@@ -157,6 +157,9 @@ func (a *App) hudLine() string {
 		if s.Dec.Aim < 1 {
 			line += fmt.Sprintf(", mira %s", it(s.Dec.Aim, 2))
 		}
+		if s.Dec.Wait != "" {
+			line += ", attesa: " + s.Dec.Wait
+		}
 	}
 	p := s.Pupil
 	if p.Valid {

@@ -62,6 +62,8 @@ func (h *home) Static(a *App, img *image.RGBA) {
 	y += a.Px(46)
 	a.drawHints(img, x, y, []keyHint{{"C", "correttore italiano e suggerimenti: " + onOff(a.Opt.UseCorrector)}}, x11ui.Left)
 	y += a.Px(46)
+	a.drawHints(img, x, y, []keyHint{{"V", a.speedLabel()}}, x11ui.Left)
+	y += a.Px(46)
 	a.drawHints(img, x, y, []keyHint{{"D", "diagnostica: " + onOff(a.Opt.Debug)}, {"G", "sguardo: " + onOff(a.Opt.ShowGaze)},
 		{"Esc", "esci"}}, x11ui.Left)
 
@@ -104,6 +106,9 @@ func (h *home) Event(a *App, ev x11ui.Event) {
 		a.SetScreen(newResults())
 	case 'p', 'u', 'c':
 		a.toggle(ev.Sym)
+		a.RefreshStatic()
+	case 'v':
+		a.cycleSpeed()
 		a.RefreshStatic()
 	case 'd':
 		a.Opt.Debug = !a.Opt.Debug

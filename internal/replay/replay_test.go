@@ -11,6 +11,7 @@ import (
 	"github.com/ablescia/kite/internal/engine"
 	"github.com/ablescia/kite/internal/gazein"
 	"github.com/ablescia/kite/internal/lm"
+	"github.com/ablescia/kite/internal/metrics"
 	"github.com/ablescia/kite/internal/oculo"
 	"github.com/ablescia/kite/internal/replay"
 	"github.com/ablescia/kite/internal/selector"
@@ -31,8 +32,10 @@ func record(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hp := selector.DefaultHybrid()
-	hp.LockFixation, hp.LandMs, hp.CautionMs, hp.RepeatMs, hp.RepeatMinMs = false, 0, 0, 700, 0
+	// la prima versione: i campi aggiunti dopo valgono zero (spenti)
+	d := selector.DefaultHybrid()
+	hp := selector.HybridParams{TMinMs: 120, TMaxMs: 700, RHi: d.RHi, RLo: d.RLo, SHi: d.SHi, RepeatMs: 700,
+		PupilGain: d.PupilGain, UsePrediction: true}
 	model := lm.New()
 	e := engine.New(engine.Config{Geom: geom, KB: kb, LM: model, Oculo: oculo.DefaultConfig(), Hybrid: hp,
 		SigmaDeg: selector.DefaultSigmaDeg, CoreFrac: selector.DefaultCoreFrac,
@@ -129,4 +132,142 @@ func TestReplayBenchDwellBlocks(t *testing.T) {
 		t.Errorf("i blocchi ibridi restano riprodotti: %d su %d", b.Same, b.Logged)
 	}
 	t.Logf("sguardo del blocco A con il selettore ibrido: %d giuste, %d errori", a.Correct, a.Errors)
+}
+
+// recordText registra tre frasi del compito "testo" con i parametri attuali
+// (armamento, tempi dei tasti di modifica, ecc.): gli errori entrano nel
+// testo e l'utente simulato li cancella.
+func recordText(t *testing.T) string {
+	dir := t.TempDir()
+	geom := gazein.Geometry{WidthMM: 700, HeightMM: 390, WidthPx: 1920, HeightPx: 1080}
+	kb, err := selector.NewKeyboard("qwerty", selector.DefaultArea, selector.DefaultGap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kb.AddEditBar(selector.DefaultBar, selector.DefaultGap, true)
+	log, err := engine.NewLogger(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hp := selector.DefaultHybrid()
+	model := lm.New()
+	e := engine.New(engine.Config{Geom: geom, KB: kb, LM: model, Oculo: oculo.DefaultConfig(), Hybrid: hp,
+		SigmaDeg: selector.DefaultSigmaDeg, CoreFrac: selector.DefaultCoreFrac,
+		PriorEps: engine.DefaultPriorEps, LumAlpha: 0.3, FovealDeg: 5, Log: log, Task: metrics.TaskText})
+	if err := log.WriteJSON("session.json", map[string]any{"layout": "qwerty", "geometry": geom, "hybrid": hp,
+		"sigma_deg": selector.DefaultSigmaDeg, "core": selector.DefaultCoreFrac, "eps": engine.DefaultPriorEps,
+		"lm": model.Name(), "area": kb.Area, "bar": kb.Bar, "gap": selector.DefaultGap, "edit_bar": true,
+		"speak_key": true, "task": metrics.TaskText}); err != nil {
+		t.Fatal(err)
+	}
+	u := sim.New(sim.DefaultParams(), geom, e, 11)
+	for i := 0; i < 90*2; i++ {
+		e.Process(u.Next())
+	}
+	for _, phrase := range []string{"casa bella", "mare blu", "treno lungo"} {
+		e.StartBlock(phrase)
+		done := false
+		for i := 0; i < 90*240 && !done; i++ {
+			e.Process(u.Next())
+			select {
+			case <-e.Events():
+				done = true
+			default:
+			}
+		}
+		if !done {
+			t.Fatalf("frase «%s» non conclusa", phrase)
+		}
+		for i := 0; i < 90; i++ {
+			e.Process(u.Next())
+		}
+	}
+	log.Close()
+	return dir
+}
+
+// La scrittura libera si rigioca come un blocco "L". Qui il terzo blocco di
+// una registrazione diventa scrittura libera, con le selezioni che portano
+// l'id del blocco 2 come faceva il motore: devono finire nel blocco libero e
+// non contaminare il blocco 2.
+func TestReplayFreeWriting(t *testing.T) {
+	dir := recordText(t)
+	orig, err := replay.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orig.Blocks) != 3 {
+		t.Fatalf("blocchi registrati: %d", len(orig.Blocks))
+	}
+	n2, n3 := len(orig.Blocks[1].Selections), len(orig.Blocks[2].Selections)
+
+	sp := filepath.Join(dir, "samples.csv")
+	b, err := os.ReadFile(sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(b), "\n")
+	for i, l := range lines[1:] {
+		f := strings.Split(l, ",")
+		if len(f) > 4 && f[3] == "block" && f[4] == "3" {
+			f[3] = "free"
+			lines[i+1] = strings.Join(f, ",")
+		}
+	}
+	if err := os.WriteFile(sp, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ep := filepath.Join(dir, "events.jsonl")
+	if b, err = os.ReadFile(ep); err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if strings.Contains(l, `"block":3,`) {
+			if strings.Contains(l, `"block_start"`) {
+				continue
+			}
+			l = strings.Replace(l, `"block":3,`, `"block":2,`, 1)
+		}
+		kept = append(kept, l)
+	}
+	if err := os.WriteFile(ep, []byte(strings.Join(kept, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := replay.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Blocks) != 3 || s.Blocks[2].Cond != replay.CondFree {
+		t.Fatalf("blocchi dopo la conversione: %d, ultimo %q", len(s.Blocks), s.Blocks[len(s.Blocks)-1].Cond)
+	}
+	if got := len(s.Blocks[1].Selections); got != n2 {
+		t.Errorf("blocco 2: %d selezioni, erano %d (contaminato dalla scrittura libera)", got, n2)
+	}
+	free := s.Blocks[2]
+	if len(free.Selections) != n3 {
+		t.Errorf("blocco libero: %d selezioni, il terzo blocco ne aveva %d", len(free.Selections), n3)
+	}
+	letters, deleted := 0, 0
+	for _, sel := range free.Selections {
+		if sel.Kind == "lettera" || sel.Kind == "spazio" {
+			letters++
+			if !sel.Correct {
+				deleted++
+			}
+		}
+	}
+	if len(free.Targets) != letters-deleted {
+		t.Errorf("bersagli %d, lettere tenute %d", len(free.Targets), letters-deleted)
+	}
+	res, err := s.Run(s.Recorded())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := res[replay.CondFree]
+	if l == nil || l.Correct == 0 || l.Same < letters*3/4 {
+		t.Fatalf("replay della scrittura libera: %+v (lettere %d)", l, letters)
+	}
+	t.Logf("scrittura libera: %d lettere (%d cancellate), riprodotte identiche %d", letters, deleted, l.Same)
 }

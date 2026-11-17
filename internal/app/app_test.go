@@ -4,7 +4,9 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"math/rand/v2"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -193,5 +195,66 @@ func TestGazeCalibrationFlow(t *testing.T) {
 	a.GeomDriver = false
 	if g.needRestart(a) {
 		t.Error("riavvio chiesto anche con -display-mm")
+	}
+}
+
+// Il tasto V del menu passa da un preset di velocità al successivo, lo
+// ricorda per le sessioni successive e lo applica alla scrittura seguente.
+func TestSpeedPresetMenu(t *testing.T) {
+	a, _ := testApp(t)
+	a.Inspect = func(string) driver.State { return driver.State{} }
+	a.SettingsPath = filepath.Join(t.TempDir(), "kite", "impostazioni.json")
+	n, _ := selector.SpeedByName(selector.DefaultSpeed)
+	a.Opt.Speed, a.Opt.TMinMs, a.Opt.TMaxMs = n.Name, n.TMinMs, n.TMaxMs
+	a.SetScreen(newHome())
+	press := func() { a.screen.Event(a, x11ui.Event{Kind: x11ui.KeyDown, Sym: 'v'}) }
+	for range selector.Speeds {
+		i := 0
+		for j, s := range selector.Speeds {
+			if s.Name == a.Opt.Speed {
+				i = j
+			}
+		}
+		want := selector.Speeds[(i+1)%len(selector.Speeds)]
+		press()
+		if a.Opt.Speed != want.Name || a.Opt.TMinMs != want.TMinMs || a.Opt.TMaxMs != want.TMaxMs {
+			t.Fatalf("dopo V: %q %v–%v ms, atteso %+v", a.Opt.Speed, a.Opt.TMinMs, a.Opt.TMaxMs, want)
+		}
+		if got := LoadSettings(a.SettingsPath).Speed; got != want.Name {
+			t.Errorf("impostazioni salvate: %q, atteso %q", got, want.Name)
+		}
+		if !strings.Contains(a.speedLabel(), want.Name) {
+			t.Errorf("etichetta del menu: %q", a.speedLabel())
+		}
+	}
+	// i tempi scelti valgono dalla scrittura libera successiva
+	press()
+	a.Eng.StartFree()
+	a.Log.Flush()
+	b, err := os.ReadFile(filepath.Join(a.Log.Dir, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got selector.HybridParams
+	for _, l := range strings.Split(string(b), "\n") {
+		var ev struct {
+			Event  string                `json:"event"`
+			Hybrid selector.HybridParams `json:"hybrid"`
+		}
+		if json.Unmarshal([]byte(l), &ev) == nil && ev.Event == "free_start" {
+			got = ev.Hybrid
+		}
+	}
+	if got.TMinMs != a.Opt.TMinMs || got.TMaxMs != a.Opt.TMaxMs {
+		t.Errorf("scrittura libera con %v–%v ms, scelti %v–%v ms", got.TMinMs, got.TMaxMs, a.Opt.TMinMs, a.Opt.TMaxMs)
+	}
+	// tempi personalizzati da riga di comando: V porta al primo preset
+	a.Opt.Speed = ""
+	if !strings.Contains(a.speedLabel(), "personalizzata") {
+		t.Errorf("etichetta con tempi personalizzati: %q", a.speedLabel())
+	}
+	press()
+	if a.Opt.Speed != selector.Speeds[0].Name {
+		t.Errorf("da personalizzata, V porta a %q", a.Opt.Speed)
 	}
 }

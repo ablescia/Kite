@@ -15,7 +15,8 @@ import (
 // Logger scrive i dati grezzi della sessione per l'analisi offline:
 //
 //	samples.csv   un campione per riga (90 Hz): sguardo, pupille, stato
-//	              oculomotore, candidato, indice pupillare, luminanza
+//	              oculomotore, candidato, indice pupillare, luminanza, e
+//	              perché il candidato non scatta ancora (wait)
 //	events.jsonl  saccadi, selezioni, inizio e fine dei blocchi, calibrazioni
 //	summary.json  risultati dell'esercizio, per frase e in totale
 type Logger struct {
@@ -28,7 +29,8 @@ type Logger struct {
 
 const sampleHeader = "host_ns,dev_us,seq,mode,block,gx,gy,g_valid,rx,ry,r_valid,pupil_l,pupil_r,pupil_l_valid,pupil_r_valid," +
 	"eye_x,eye_y,eye_z,phase,vel_deg_s,peak_thr,onset_thr,fix_id,fix_cx,fix_cy,fix_rms_deg,fix_stable," +
-	"cand,progress,required_ms,selected,pupil_meas,pupil_pred,pupil_resid,pupil_z,pupil_valid,lum_eff,lum_global\n"
+	"cand,progress,required_ms,selected,pupil_meas,pupil_pred,pupil_resid,pupil_z,pupil_valid,lum_eff,lum_global," +
+	"fix_drift,wait\n"
 
 // NewLogger crea la cartella della sessione e i file.
 func NewLogger(dir string) (*Logger, error) {

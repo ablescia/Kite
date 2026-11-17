@@ -173,3 +173,57 @@ func TestMicrosaccadeKeepsFixation(t *testing.T) {
 		t.Errorf("una microsaccade di 0,6° non deve aprire una nuova fissazione (id %d)", st.FixID)
 	}
 }
+
+// Uno sguardo che scivola lentamente (senza saccade) per 3° rende la
+// fissazione dispersa per sempre (Drift), ma la finestra recente torna
+// stabile dove lo sguardo si ferma: è ciò che serve per non lasciare un tasto
+// guardato a lungo in una fissazione che non può più attivare nulla.
+func TestDriftAndRecentWindow(t *testing.T) {
+	r := rand.New(rand.NewPCG(9, 10))
+	var tr trace
+	a := [2]float64{0.5, 0.5}
+	b := [2]float64{0.5 + degToNorm(3), 0.5}
+	tr.fixation(r, a, 60, 0.05)
+	for i := 1; i <= 40; i++ { // 3° in 440 ms: ~7°/s, sotto ogni soglia di saccade
+		f := float64(i) / 40
+		tr.add([2]float64{a[0] + f*(b[0]-a[0]), a[1]})
+	}
+	tr.fixation(r, b, 30, 0.05)
+	d := New(DefaultConfig(), geom)
+	var st State
+	sawStableDrift := false
+	for i := range tr.t {
+		st, _ = d.Update(tr.t[i], tr.p[i], true, eye)
+		if i == 59 && (!st.FixStable || st.Drift || !st.WinStable) {
+			t.Fatalf("fissazione ferma: stabile %v, deriva %v, finestra stabile %v", st.FixStable, st.Drift, st.WinStable)
+		}
+		if st.Drift && st.WinStable {
+			sawStableDrift = true
+		}
+	}
+	if st.FixID != 1 {
+		t.Fatalf("lo scivolamento lento non è una saccade (id %d)", st.FixID)
+	}
+	if st.FixStable || !st.Drift {
+		t.Errorf("dopo 3° di scivolamento la fissazione è dispersa: stabile %v, deriva %v (disp. %.2f°)", st.FixStable, st.Drift, st.FixRMSDeg)
+	}
+	if !st.WinStable || !sawStableDrift {
+		t.Errorf("la finestra recente torna stabile dove lo sguardo si ferma (disp. %.2f°)", st.WinRMSDeg)
+	}
+	if dx := math.Abs(st.WinCentroid[0] - b[0]); dx > degToNorm(0.2) {
+		t.Errorf("centroide recente a %.2f° dal punto d'arrivo", dx/degToNorm(1))
+	}
+	if dx := math.Abs(st.FixCentroid[0] - b[0]); dx < degToNorm(0.5) {
+		t.Errorf("il centroide dell'intera fissazione resta indietro (%.2f°)", dx/degToNorm(1))
+	}
+
+	cfg := DefaultConfig()
+	cfg.WindowSamples = 0
+	d = New(cfg, geom)
+	for i := range tr.t {
+		st, _ = d.Update(tr.t[i], tr.p[i], true, eye)
+	}
+	if st.WinStable {
+		t.Error("senza finestra non c'è una finestra stabile")
+	}
+}

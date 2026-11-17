@@ -5,7 +5,7 @@
 // e con quelli attuali (o con una serie di varianti, -suite), e confronta
 // errori, lettere mancate e tempi.
 //
-//	kite-replay                    # tutte le sessioni registrate
+//	kite-replay                    # tutte le sessioni registrate (scrittura libera e copiatura)
 //	kite-replay -suite             # contributo di ogni correzione
 //	kite-replay -v DIR             # una sessione, con l'elenco degli errori
 //	kite-replay -correttore        # il correttore sulle parole copiate
@@ -91,17 +91,21 @@ func main() {
 	}
 
 	fmt.Println()
-	fmt.Println("Blocchi B: lo sguardo di chi usava il selettore ibrido. Blocchi A (solo nelle sessioni del")
-	fmt.Println("banco di prova): lo sguardo naturale, con il dwell fisso di 1 s, rigiocato con il selettore")
-	fmt.Println("ibrido. Ritardo = lettere lasciate prima dell'attivazione, che dal vivo si sarebbero attese")
-	fmt.Println("guardandole ancora; Δ = anticipo o ritardo medio delle lettere giuste rispetto al log")
-	fmt.Println("(escluse quelle anticipate di oltre 1 s, dove il replay ha perso la sincronia con la")
-	fmt.Printf("persona); netto = Δ × lettere + errori in più o in meno × %.1f s.\n\n", replay.ErrorCostS)
-	fmt.Printf("%-44s │ %-44s │ %s\n", "", "blocchi B", "blocchi A (sguardo naturale)")
-	fmt.Printf("%-44s │ %4s %6s %7s %6s %6s %7s │ %4s %6s %7s %6s\n", "variante",
-		"err", "giuste", "ritardo", "acc", "Δ ms", "netto s", "err", "giuste", "ritardo", "acc")
+	fmt.Println("L: scrittura libera (le lettere poi cancellate contano come errori). B: copiatura con il selettore")
+	fmt.Println("ibrido. A (solo nelle sessioni del banco di prova): lo sguardo naturale, con il dwell fisso di 1 s,")
+	fmt.Println("rigiocato con il selettore ibrido. Ritardo = lettere lasciate prima dell'attivazione, che dal vivo")
+	fmt.Println("si sarebbero attese guardandole ancora; Δ = anticipo o ritardo medio delle lettere giuste rispetto")
+	fmt.Println("al log (escluse quelle anticipate di oltre 1 s, dove il replay ha perso la sincronia con la persona);")
+	fmt.Printf("netto = Δ × lettere + errori in più o in meno × %.1f s (L) o %.1f s (B).\n\n", replay.ErrorCostFreeS, replay.ErrorCostS)
+	conds := []string{replay.CondFree, replay.CondHybrid, replay.CondDwell}
+	fmt.Printf("%-44s │ %-37s │ %-37s │ %s\n", "", "L: scrittura libera", "B: copiatura", "A: sguardo naturale")
+	head := fmt.Sprintf("%4s %5s %4s %6s %5s %6s", "err", "giuste", "rit", "acc", "Δ ms", "netto")
+	fmt.Printf("%-44s │ %s │ %s │ %4s %5s %4s %6s\n", "variante", head, head, "err", "giuste", "rit", "acc")
 	for _, e := range variants {
-		tot := map[string]*replay.Result{replay.CondDwell: {}, replay.CondHybrid: {}}
+		tot := map[string]*replay.Result{}
+		for _, c := range conds {
+			tot[c] = &replay.Result{Cond: c}
+		}
 		var picks []replay.Pick
 		for _, s := range sessions {
 			res, err := s.Run(e.v(s))
@@ -125,18 +129,29 @@ func main() {
 				picks = append(picks, r.Picks...)
 			}
 		}
-		a, b := tot[replay.CondDwell], tot[replay.CondHybrid]
-		a.Summarize()
-		b.Summarize()
-		fmt.Printf("%-44s │ %4d %6d %7d %5.1f%% %+6.0f %+7.1f │ %4d %6d %7d %5.1f%%\n", e.name,
-			b.Errors, b.Correct, b.Late, 100*b.Accuracy(), b.DeltaMs, b.NetS(),
-			a.Errors, a.Correct, a.Late, 100*a.Accuracy())
-		if b.Missed+a.Missed > 0 {
-			fmt.Printf("%-44s │ lettere mai candidate (ritardo sconosciuto): B %d, A %d\n", "", b.Missed, a.Missed)
+		for _, t := range tot {
+			t.Summarize()
+		}
+		fmt.Printf("%-44s", e.name)
+		for _, c := range conds[:2] {
+			t := tot[c]
+			fmt.Printf(" │ %4d %6d %4d %5.1f%% %+5.0f %+6.1f", t.Errors, t.Correct, t.Late, 100*t.Accuracy(), t.DeltaMs, t.NetS())
+		}
+		a := tot[replay.CondDwell]
+		fmt.Printf(" │ %4d %5d %4d %5.1f%%\n", a.Errors, a.Correct, a.Late, 100*a.Accuracy())
+		var missed []string
+		for _, c := range conds {
+			if m := tot[c].Missed; m > 0 {
+				missed = append(missed, fmt.Sprintf("%s %d", c, m))
+			}
+		}
+		if len(missed) > 0 {
+			fmt.Printf("%-44s │ lettere mai candidate (ritardo sconosciuto): %s\n", "", strings.Join(missed, ", "))
 		}
 		if e.name == "registrato" {
-			fmt.Printf("%-44s │ log: %d selezioni, %d errori; identiche nel replay: %d\n", "  (controllo di fedeltà)",
-				b.Logged, b.LogError, b.Same)
+			fmt.Printf("%-44s │ log: L %d selezioni, %d cancellate; B %d selezioni, %d errori; identiche nel replay: L %d, B %d\n",
+				"  (controllo di fedeltà)", tot[replay.CondFree].Logged, tot[replay.CondFree].LogError,
+				tot[replay.CondHybrid].Logged, tot[replay.CondHybrid].LogError, tot[replay.CondFree].Same, tot[replay.CondHybrid].Same)
 		}
 		if *verbose && (e.name == "registrato" || e.name == "attuale") {
 			printErrors(picks)
@@ -148,10 +163,12 @@ func main() {
 // parametri della prima versione, poi prova alcune varianti dei valori.
 func suiteVariants(current func(*replay.Session) replay.Variant) []entry {
 	old := func() replay.Variant {
-		h := selector.DefaultHybrid()
-		h.LockFixation, h.LandMs, h.CautionMs, h.RepeatMs, h.RepeatMinMs = false, 0, 0, 700, 0
+		d := selector.DefaultHybrid()
+		h := selector.HybridParams{TMinMs: 120, TMaxMs: 700, RHi: d.RHi, RLo: d.RLo, SHi: d.SHi, RepeatMs: 700,
+			PupilGain: d.PupilGain, UsePrediction: true}
 		return replay.Variant{Hybrid: h, Sigma: 1.6, Core: 0.6, Eps: engine.DefaultPriorEps}
 	}
+	d := selector.DefaultHybrid()
 	steps := []struct {
 		name string
 		f    func(*replay.Variant)
@@ -159,18 +176,25 @@ func suiteVariants(current func(*replay.Session) replay.Variant) []entry {
 		{"prima versione", func(v *replay.Variant) {}},
 		{"+ una selezione per fissazione", func(v *replay.Variant) { v.Hybrid.LockFixation = true }},
 		{"+ attesa della correttiva (atterraggio)", func(v *replay.Variant) {
-			d := selector.DefaultHybrid()
 			v.Hybrid.LandMs, v.Hybrid.LandAmpDeg, v.Hybrid.LandConf, v.Hybrid.Landing = d.LandMs, d.LandAmpDeg, d.LandConf, d.Landing
 		}},
 		{"+ ripetizione secondo la predizione", func(v *replay.Variant) {
-			d := selector.DefaultHybrid()
 			v.Hybrid.RepeatMs, v.Hybrid.RepeatMinMs = d.RepeatMs, d.RepeatMinMs
 		}},
 		{"+ prudenza dopo un errore", func(v *replay.Variant) {
-			d := selector.DefaultHybrid()
 			v.Hybrid.CautionMs, v.Hybrid.CautionSel = d.CautionMs, d.CautionSel
 		}},
-		{"+ lessico italiano grande (= attuale)", func(v *replay.Variant) { v.LM = "italiano" }},
+		{"+ lessico italiano grande", func(v *replay.Variant) { v.LM = "italiano" }},
+		{"+ armamento della tastiera", func(v *replay.Variant) { v.Hybrid.Arm = true }},
+		{"+ doppie improbabili solo uscendo", func(v *replay.Variant) { v.Hybrid.RepeatHoldMinR = d.RepeatHoldMinR }},
+		{"+ veto della mira", func(v *replay.Variant) { v.Hybrid.AimVeto = d.AimVeto }},
+		{"+ da capo se la fissazione si disperde", func(v *replay.Variant) {
+			v.Hybrid.RestartUnstable, v.Hybrid.EditRecover = true, true
+		}},
+		{"+ tasti di modifica a tempo proprio", func(v *replay.Variant) {
+			v.Hybrid.EditMs, v.Hybrid.SpeakMs, v.Hybrid.CancRepeatMs = d.EditMs, d.SpeakMs, d.CancRepeatMs
+		}},
+		{"+ tempi 200–1000 ms (= attuale)", func(v *replay.Variant) { v.Hybrid = selector.DefaultHybrid() }},
 	}
 	var out []entry
 	cur := old()
@@ -186,26 +210,28 @@ func suiteVariants(current func(*replay.Session) replay.Variant) []entry {
 		v.Name = name
 		out = append(out, entry{name, func(*replay.Session) replay.Variant { return v }})
 	}
+	for _, sp := range selector.Speeds {
+		tweak(fmt.Sprintf("attuale, preset %s (%.0f–%.0f ms)", sp.Name, sp.TMinMs, sp.TMaxMs), func(v *replay.Variant) {
+			v.Hybrid.TMinMs, v.Hybrid.TMaxMs = sp.TMinMs, sp.TMaxMs
+		})
+	}
+	tweak("attuale, tempi di prima (120–700 ms)", func(v *replay.Variant) { v.Hybrid.TMinMs, v.Hybrid.TMaxMs = 120, 700 })
+	tweak("attuale, senza armamento", func(v *replay.Variant) { v.Hybrid.Arm = false })
+	tweak("attuale, senza veto della mira", func(v *replay.Variant) { v.Hybrid.AimVeto = 0 })
+	tweak("attuale, doppie improbabili anche tenendo", func(v *replay.Variant) { v.Hybrid.RepeatHoldMinR = 0 })
 	tweak("attuale, atterraggio sempre (senza modello)", func(v *replay.Variant) { v.Hybrid.LandConf = 2 })
 	tweak("attuale, senza atterraggio", func(v *replay.Variant) { v.Hybrid.LandMs = 0 })
-	for _, ms := range []float64{220, 350} {
-		tweak(fmt.Sprintf("attuale, atterraggio %.0f ms", ms), func(v *replay.Variant) { v.Hybrid.LandMs = ms })
-	}
-	for _, sg := range []float64{0.8, 1.2, 2.0} {
+	for _, sg := range []float64{1.2, 2.0} {
 		tweak(fmt.Sprintf("attuale, σ %.1f°", sg), func(v *replay.Variant) { v.Sigma = sg })
 	}
 	for _, c := range []float64{0.4, 0.8} {
 		tweak(fmt.Sprintf("attuale, nucleo %.0f%%", 100*c), func(v *replay.Variant) { v.Core = c })
 	}
-	tweak("attuale, ripetizione fissa 1500 ms", func(v *replay.Variant) { v.Hybrid.RepeatMinMs = 0 })
-	tweak("attuale, ripetizione 500…1500 ms", func(v *replay.Variant) { v.Hybrid.RepeatMinMs = 500 })
-	tweak("attuale, ripetizione 700…2000 ms", func(v *replay.Variant) { v.Hybrid.RepeatMs = 2000 })
-	for _, c := range []float64{0, 300, 500} {
+	for _, c := range []float64{0, 300, 700} {
 		tweak(fmt.Sprintf("attuale, prudenza %.0f ms", c), func(v *replay.Variant) { v.Hybrid.CautionMs = c })
 	}
-	tweak("attuale, prudenza per 2 selezioni", func(v *replay.Variant) { v.Hybrid.CautionSel = 2 })
-	for _, t := range []float64{150} {
-		tweak(fmt.Sprintf("attuale, tmin %.0f ms", t), func(v *replay.Variant) { v.Hybrid.TMinMs = t })
+	for _, rh := range []float64{2, 8} {
+		tweak(fmt.Sprintf("attuale, RHi %.0f", rh), func(v *replay.Variant) { v.Hybrid.RHi = rh })
 	}
 	return out
 }

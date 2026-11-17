@@ -135,6 +135,15 @@ func TestDecoderExpansionAndAnchoring(t *testing.T) {
 	_ = ka
 }
 
+// params sono i parametri predefiniti senza pupilla e senza armamento: i
+// test dei singoli meccanismi misurano i tempi da un selettore appena creato,
+// mentre l'armamento chiede CautionMs alla prima selezione (TestHybridArm).
+func params() HybridParams {
+	p := DefaultHybrid()
+	p.PupilGain, p.Arm = 0, false
+	return p
+}
+
 // fix costruisce lo stato oculare di una fissazione stabile su p.
 func fix(id uint64, startUs int64, p [2]float64) oculo.State {
 	return oculo.State{Phase: oculo.Fixation, FixID: id, FixStartUs: startUs, FixN: 5,
@@ -153,8 +162,7 @@ func runHybrid(h *Hybrid, st oculo.State, prior []float64, fromUs, toUs int64) (
 
 func TestHybridAdaptiveDwell(t *testing.T) {
 	kb := keyboard(t)
-	p := DefaultHybrid()
-	p.PupilGain = 0
+	p := params()
 	prior := make([]float64, len(kb.Keys))
 	for i := range prior {
 		prior[i] = 0.2 / float64(len(prior)-1)
@@ -241,8 +249,8 @@ func TestHybridLockFixation(t *testing.T) {
 	a, s := kb.IndexOf('a'), kb.IndexOf('s')
 	prior := priorWith(kb, map[rune]float64{'a': 0.4, 's': 0.4})
 	for _, lock := range []bool{true, false} {
-		p := DefaultHybrid()
-		p.PupilGain, p.LockFixation = 0, lock
+		p := params()
+		p.LockFixation = lock
 		h := NewHybrid(p, decoder(kb))
 		if sel := runHybrid(h, fix(1, 1_000_000, kb.Keys[a].Center), prior, 1_000_000, 1_300_000); len(sel) != 1 {
 			t.Fatalf("prima selezione: %v", sel)
@@ -283,8 +291,7 @@ func TestHybridRepeat(t *testing.T) {
 	kb := qwerty(t)
 	e, z := kb.IndexOf('e'), kb.IndexOf('z')
 	prior := priorWith(kb, map[rune]float64{'e': 0.5})
-	p = DefaultHybrid()
-	p.PupilGain = 0
+	p = params()
 	h := NewHybrid(p, decoder(kb))
 	runHybrid(h, fix(1, 1_000_000, kb.Keys[e].Center), prior, 1_000_000, 1_300_000)
 	// un'occhiata breve alla Z (improbabile: non si attiva), poi di nuovo la E
@@ -303,8 +310,10 @@ func TestHybridLanding(t *testing.T) {
 	kb := qwerty(t)
 	q, i, o := kb.IndexOf('q'), kb.IndexOf('i'), kb.IndexOf('o')
 	prior := priorWith(kb, map[rune]float64{'o': 0.5, 'i': 0.1})
-	p := DefaultHybrid()
-	p.PupilGain = 0
+	// la regola dell'atterraggio da sola: tempi della prima versione, così la
+	// I (r ≈ 2,7) è più veloce di LandMs, e senza il veto della mira
+	p := params()
+	p.TMinMs, p.TMaxMs, p.AimVeto = 120, 700, 0
 	d := decoder(kb)
 	from := kb.Keys[q].Center
 	landing := func(id uint64, to [2]float64) oculo.State {
@@ -340,8 +349,7 @@ func TestHybridCaution(t *testing.T) {
 	kb := qwerty(t)
 	e, r := kb.IndexOf('e'), kb.IndexOf('r')
 	prior := priorWith(kb, map[rune]float64{'e': 0.4, 'r': 0.4})
-	p := DefaultHybrid()
-	p.PupilGain = 0
+	p := params()
 	h := NewHybrid(p, decoder(kb))
 	runHybrid(h, fix(1, 1_000_000, kb.Keys[e].Center), prior, 1_000_000, 1_300_000)
 	h.Feedback(false)
@@ -415,11 +423,241 @@ func TestEditBar(t *testing.T) {
 		t.Error("un suggerimento spento non si attiva")
 	}
 	// le lettere non cambiano tempi per la presenza della barra: r su 27 tasti
-	h := NewHybrid(DefaultHybrid(), d)
+	h := NewHybrid(params(), d)
 	e := kb.IndexOf('e')
 	sel := runHybrid(h, fix(1, 1_000_000, kb.Keys[e].Center), prior, 1_000_000, 1_800_000)
 	want := h.P.RequiredMs(1, 1, 0, false)
 	if len(sel) != 1 || math.Abs(float64(sel[0])/1000-want) > 12 {
 		t.Errorf("lettera con priore uniforme: %v µs, attesa a ~%.0f ms", sel, want)
+	}
+}
+
+// editBoard è la QWERTY con la barra di modifica e il priore della scrittura
+// libera: lettere alla pari, cancella e parla accesi, suggerimenti spenti.
+func editBoard(t *testing.T) (*Keyboard, []float64) {
+	kb := qwerty(t)
+	kb.AddEditBar(DefaultBar, DefaultGap, true)
+	prior := make([]float64, len(kb.Keys))
+	for i := 0; i < kb.Chars; i++ {
+		prior[i] = 1.0 / float64(kb.Chars)
+	}
+	prior[kb.IndexOf(KeyBackspace)] = 0.1 / float64(kb.Chars)
+	prior[kb.IndexOf(KeySpeak)] = 0.1 / float64(kb.Chars)
+	return kb, prior
+}
+
+// Armamento: lo sguardo già fermo su un tasto quando la tastiera si attiva
+// non lo scrive subito. Il tempo si conta dall'attivazione e la prima
+// selezione chiede CautionMs; lo stesso quando la tastiera torna attiva
+// (Rearm, a voce finita).
+func TestHybridArm(t *testing.T) {
+	kb := qwerty(t)
+	e, s := kb.IndexOf('e'), kb.IndexOf('s')
+	prior := priorWith(kb, map[rune]float64{'e': 0.4, 's': 0.4}) // r ≈ 11: tempo minimo
+	p := DefaultHybrid()
+	p.PupilGain = 0
+	// lo sguardo è sulla E da 600 ms quando arriva il primo campione
+	st := fix(1, 1_000_000, kb.Keys[e].Center)
+	h := NewHybrid(p, decoder(kb))
+	sel := runHybrid(h, st, prior, 1_600_000, 2_600_000)
+	if len(sel) != 1 || math.Abs(float64(sel[0])/1000-(600+p.CautionMs)) > 12 {
+		t.Errorf("all'attivazione: selezioni a %v µs dall'inizio della fissazione, attesa a ~%v ms", sel, 600+p.CautionMs)
+	}
+	// la prudenza vale per la prima selezione sola
+	sel = runHybrid(h, fix(2, 3_000_000, kb.Keys[s].Center), prior, 3_000_000, 3_400_000)
+	if len(sel) != 1 || float64(sel[0])/1000 > p.TMinMs+12 {
+		t.Errorf("seconda selezione: %v µs, attesa a ~%v ms", sel, p.TMinMs)
+	}
+	// a voce finita: lo sguardo è sulla E da 400 ms
+	h.Rearm()
+	sel = runHybrid(h, fix(3, 4_000_000, kb.Keys[e].Center), prior, 4_400_000, 5_400_000)
+	if len(sel) != 1 || math.Abs(float64(sel[0])/1000-(400+p.CautionMs)) > 12 {
+		t.Errorf("dopo Rearm: %v µs, attesa a ~%v ms", sel, 400+p.CautionMs)
+	}
+	// senza armamento (prima versione) la E scatta al primo campione
+	p.Arm = false
+	h = NewHybrid(p, decoder(kb))
+	if sel := runHybrid(h, st, prior, 1_600_000, 2_000_000); len(sel) != 1 || sel[0] != 600_000 {
+		t.Errorf("senza armamento: %v µs, attesa al primo campione (600 ms)", sel)
+	}
+}
+
+// I tasti di modifica hanno tempi propri, che non seguono TMaxMs: cancella
+// EditMs, parla SpeakMs; cancella tenuto si ripete ogni CancRepeatMs.
+func TestHybridEditKeys(t *testing.T) {
+	kb, prior := editBoard(t)
+	bs, sp := kb.IndexOf(KeyBackspace), kb.IndexOf(KeySpeak)
+	p := params()
+	for _, c := range []struct {
+		k    int
+		want float64
+	}{{bs, p.EditMs}, {sp, p.SpeakMs}} {
+		h := NewHybrid(p, decoder(kb))
+		sel := runHybrid(h, fix(1, 1_000_000, kb.Keys[c.k].Center), prior, 1_000_000, 2_500_000)
+		if len(sel) == 0 || math.Abs(float64(sel[0])/1000-c.want) > 12 {
+			t.Errorf("tasto %q: selezioni a %v µs, attesa a ~%v ms", kb.Keys[c.k].Char, sel, c.want)
+		}
+	}
+	h := NewHybrid(p, decoder(kb))
+	sel := runHybrid(h, fix(1, 1_000_000, kb.Keys[bs].Center), prior, 1_000_000, 2_900_000)
+	if len(sel) != 2 || math.Abs(float64(sel[1]-sel[0])/1000-p.CancRepeatMs) > 12 {
+		t.Errorf("cancella tenuto: %v µs, ripetizione attesa dopo %v ms", sel, p.CancRepeatMs)
+	}
+	// prima versione: come una lettera improbabile
+	p.EditMs, p.SpeakMs, p.CancRepeatMs = 0, 0, 0
+	h = NewHybrid(p, decoder(kb))
+	sel = runHybrid(h, fix(1, 1_000_000, kb.Keys[bs].Center), prior, 1_000_000, 2_200_000)
+	if len(sel) != 1 || math.Abs(float64(sel[0])/1000-p.TMaxMs) > 12 {
+		t.Errorf("cancella senza EditMs: %v µs, atteso a TMaxMs (%v ms)", sel, p.TMaxMs)
+	}
+}
+
+// Una doppia improbabile non si scrive tenendo il tasto (lo sguardo fermo è
+// una pausa per pensare): si esce e si rientra. Le doppie probabili si
+// ripetono tenendolo (TestHybridAdaptiveDwell).
+func TestHybridImprobableDoubleNeedsExit(t *testing.T) {
+	kb := qwerty(t)
+	b, o := kb.IndexOf('b'), kb.IndexOf('o')
+	prior := priorWith(kb, map[rune]float64{'b': 0.01, 'o': 0.6}) // r(b) ≈ 0,27
+	p := params()
+	h := NewHybrid(p, decoder(kb))
+	st := fix(1, 1_000_000, kb.Keys[b].Center)
+	if sel := runHybrid(h, st, prior, 1_000_000, 4_000_000); len(sel) != 1 {
+		t.Fatalf("tenendo la B per 3 s: %v µs, attesa una selezione sola", sel)
+	}
+	if d := h.Update(&Input{TUs: 4_011_111, Oc: st, Eye: gazein.DefaultEye, Prior: prior}); d.Wait != WaitLeave || d.Progress != 0 {
+		t.Errorf("doppia improbabile tenuta: attesa %q, avanzamento %.2f", d.Wait, d.Progress)
+	}
+	runHybrid(h, fix(2, 4_100_000, kb.Keys[o].Center), prior, 4_100_000, 4_150_000) // occhiata alla O
+	if sel := runHybrid(h, fix(3, 4_300_000, kb.Keys[b].Center), prior, 4_300_000, 5_500_000); len(sel) != 1 {
+		t.Errorf("uscendo e rientrando la doppia si scrive: %v", sel)
+	}
+	p.RepeatHoldMinR = 0 // prima versione
+	h = NewHybrid(p, decoder(kb))
+	if sel := runHybrid(h, st, prior, 1_000_000, 4_000_000); len(sel) != 2 {
+		t.Errorf("senza RepeatHoldMinR la B si ripete tenendola: %v", sel)
+	}
+}
+
+// Veto della mira: dopo una saccade lunga, una lettera a cui la saccade
+// probabilmente non mirava chiede il tempo massimo. Non vale per i tasti di
+// modifica, che il modello di lingua non conosce.
+func TestHybridAimVeto(t *testing.T) {
+	kb, _ := editBoard(t)
+	q, i, bs := kb.IndexOf('q'), kb.IndexOf('i'), kb.IndexOf(KeyBackspace)
+	prior := priorWith(kb, map[rune]float64{'o': 0.8, 'i': 0.05})
+	prior[bs] = 0.1 / float64(kb.Chars)
+	for _, s := range []rune{KeySuggest, KeySuggest + 1, KeySuggest + 2, KeySpeak} {
+		prior[kb.IndexOf(s)] = 0
+	}
+	p := params()
+	d := decoder(kb)
+	from := kb.Keys[q].Center
+	landing := func(id uint64, to [2]float64) oculo.State {
+		st := fix(id, 1_000_000*int64(id), to)
+		st.Last = oculo.SaccadeInfo{From: from, To: to, AmplitudeDeg: geom.AngleDeg(gazein.DefaultEye, from, to)}
+		return st
+	}
+	aim := make([]float64, len(kb.Keys))
+	d.AimPosterior(from, kb.Keys[i].Center, gazein.DefaultEye, prior, p.Landing, aim)
+	if aim[i] >= p.AimVeto {
+		t.Fatalf("il caso di prova richiede una mira bassa sulla I: %.2f", aim[i])
+	}
+	h := NewHybrid(p, d)
+	if sel := runHybrid(h, landing(1, kb.Keys[i].Center), prior, 1_000_000, 2_200_000); len(sel) != 1 ||
+		math.Abs(float64(sel[0])/1000-p.TMaxMs) > 12 {
+		t.Errorf("I con mira %.2f: %v µs, attesa a TMaxMs (%v ms)", aim[i], sel, p.TMaxMs)
+	}
+	h = NewHybrid(p, d)
+	if sel := runHybrid(h, landing(2, kb.Keys[bs].Center), prior, 2_000_000, 3_200_000); len(sel) != 1 ||
+		math.Abs(float64(sel[0])/1000-p.EditMs) > 12 {
+		t.Errorf("cancella dopo una saccade lunga: %v µs, atteso a EditMs (%v ms)", sel, p.EditMs)
+	}
+	p.AimVeto = 0
+	h = NewHybrid(p, d)
+	normal := p.RequiredMs(prior[i]*float64(kb.Chars), 1, 0, false)
+	if sel := runHybrid(h, landing(1, kb.Keys[i].Center), prior, 1_000_000, 2_200_000); len(sel) != 1 ||
+		math.Abs(float64(sel[0])/1000-math.Max(normal, p.LandMs)) > 12 {
+		t.Errorf("senza veto: %v µs, attesa a ~%.0f ms", sel, math.Max(normal, p.LandMs))
+	}
+}
+
+// Fissazione dispersa senza saccade: su una lettera il conteggio riparte e
+// l'avanzamento torna a zero (prima il cerchio restava pieno senza poter
+// scattare); un tasto di modifica su cui lo sguardo si è fermato adesso si
+// sceglie con il conteggio da capo.
+func TestHybridDrift(t *testing.T) {
+	kb, prior := editBoard(t)
+	e, bs := kb.IndexOf('e'), kb.IndexOf(KeyBackspace)
+	p := params()
+	drift := func(st oculo.State, win [2]float64) oculo.State {
+		st.Drift, st.FixStable, st.WinStable, st.WinCentroid = true, false, true, win
+		return st
+	}
+	h := NewHybrid(p, decoder(kb))
+	st := fix(1, 1_000_000, kb.Keys[e].Center)
+	runHybrid(h, st, prior, 1_000_000, 1_250_000)
+	ds := drift(st, kb.Keys[e].Center)
+	for tu := int64(1_260_000); tu < 3_000_000; tu += 11111 {
+		d := h.Update(&Input{TUs: tu, Oc: ds, Eye: gazein.DefaultEye, Prior: prior})
+		if d.Selected >= 0 || d.Progress != 0 || d.Wait != WaitDrift || d.Candidate != e {
+			t.Fatalf("lettera in una fissazione dispersa: %+v", d)
+		}
+	}
+	// prima versione: il cerchio si riempie ma la lettera non scatta
+	old := p
+	old.RestartUnstable, old.EditRecover = false, false
+	h = NewHybrid(old, decoder(kb))
+	var last Decision
+	for tu := int64(1_000_000); tu < 3_000_000; tu += 11111 {
+		if last = h.Update(&Input{TUs: tu, Oc: ds, Eye: gazein.DefaultEye, Prior: prior}); last.Selected >= 0 {
+			t.Fatal("prima versione: nessuna selezione in una fissazione instabile")
+		}
+	}
+	if last.Progress < 1 {
+		t.Errorf("prima versione: avanzamento %.2f", last.Progress)
+	}
+	// cancella: il centroide dell'intera fissazione è finito sopra la barra,
+	// la finestra recente è ferma su cancella da 1,5 s in poi
+	h = NewHybrid(p, decoder(kb))
+	r := kb.Keys[bs].Rect
+	cs := drift(fix(1, 1_000_000, [2]float64{kb.Keys[bs].Center[0], r[1] - 0.02}), kb.Keys[bs].Center)
+	sel := runHybrid(h, cs, prior, 1_500_000, 2_600_000)
+	if len(sel) != 1 || math.Abs(float64(sel[0])/1000-(500+p.EditMs)) > 12 {
+		t.Errorf("cancella ripreso dalla finestra recente: %v µs, atteso a ~%v ms", sel, 500+p.EditMs)
+	}
+}
+
+// Tolleranza sul bordo dei tasti di modifica: lo sguardo poco fuori dal tasto
+// lo sceglie, tra due tasti vince il più vicino, una lettera resta lettera.
+func TestDecoderEditMargin(t *testing.T) {
+	kb, prior := editBoard(t)
+	d := decoder(kb)
+	post := make([]float64, len(kb.Keys))
+	bs, sp, pk := kb.IndexOf(KeyBackspace), kb.IndexOf(KeySpeak), kb.IndexOf('p')
+	r := kb.Keys[bs].Rect
+	above := [2]float64{kb.Keys[bs].Center[0], r[1] - 2/geom.HeightMM} // 2 mm sopra cancella
+	if k, _ := d.Decode(above, gazein.DefaultEye, prior, post); k != -1 {
+		t.Errorf("senza tolleranza, 2 mm sopra cancella: tasto %d", k)
+	}
+	d.EditMarginDeg = 0.4
+	if k, _ := d.Decode(above, gazein.DefaultEye, prior, post); k != bs {
+		t.Errorf("con 0,4° di tolleranza, 2 mm sopra cancella: tasto %d", k)
+	}
+	if k, _ := d.Decode([2]float64{above[0], r[1] - 8/geom.HeightMM}, gazein.DefaultEye, prior, post); k != -1 {
+		t.Errorf("8 mm sopra cancella (oltre la tolleranza): tasto %d", k)
+	}
+	mid := (kb.Keys[bs].Rect[2] + kb.Keys[sp].Rect[0]) / 2
+	y := kb.Keys[bs].Center[1]
+	if k, _ := d.Decode([2]float64{mid - 0.5/geom.WidthMM, y}, gazein.DefaultEye, prior, post); k != bs {
+		t.Errorf("nello spazio tra cancella e parla, più vicino a cancella: %d", k)
+	}
+	if k, _ := d.Decode([2]float64{mid + 0.5/geom.WidthMM, y}, gazein.DefaultEye, prior, post); k != sp {
+		t.Errorf("nello spazio tra cancella e parla, più vicino a parla: %d", k)
+	}
+	d.EditMarginDeg = 1.0 // arriverebbe fino alla riga QWERTY
+	top := [2]float64{kb.Keys[pk].Center[0], kb.Keys[pk].Rect[1] + 0.001}
+	if k, _ := d.Decode(top, gazein.DefaultEye, prior, post); kb.Keys[k].Strict {
+		t.Errorf("lo sguardo dentro la P resta a una lettera: %q", kb.Keys[k].Char)
 	}
 }

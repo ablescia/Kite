@@ -64,10 +64,14 @@ type Options struct {
 	UsePupil      bool // modulazione dal carico pupillare
 	UseCorrector  bool // correttore italiano e suggerimenti (scrittura libera ed esercizio "testo")
 	UsePhrases    bool // scrittura libera: frase proposta dalle frasi imparate
-	Debug         bool // aree di tocco effettive e pannello diagnostico
-	ShowGaze      bool
-	Auto          bool // avanza da solo nelle attese (simulazione, test)
-	Seed          uint64
+	// Tempi delle lettere: il preset (selector.Speeds; "" = personalizzati
+	// da riga di comando) e i suoi valori.
+	Speed          string
+	TMinMs, TMaxMs float64
+	Debug          bool // aree di tocco effettive e pannello diagnostico
+	ShowGaze       bool
+	Auto           bool // avanza da solo nelle attese (simulazione, test)
+	Seed           uint64
 }
 
 // Screen è una schermata.
@@ -84,22 +88,23 @@ type engineListener interface {
 
 // App è l'applicazione.
 type App struct {
-	Eng         *engine.Engine
-	Disp        x11ui.Display
-	Geom        gazein.Geometry
-	KB          *selector.Keyboard
-	LM          *lm.Model
-	Log         *engine.Logger
-	Opt         Options
-	ModelPath   string
-	WordsPath   string // dizionario personale ("" = non si salva)
-	PhrasesPath string // frasi imparate, una per riga ("" = non si salvano)
-	Task        string // compito dell'esercizio (metrics.TaskText o TaskStrict)
-	Source      string // "UDP 127.0.0.1:5005" o "simulazione"
-	VoiceInfo   string // la voce del tasto parla, per esempio "it_IT-serena-high (Piper, 22050 Hz, pw-play)"
-	VoiceErr    string // perché non c'è una voce
-	UDPStats    *gazein.Stats
-	ShotDir     string
+	Eng          *engine.Engine
+	Disp         x11ui.Display
+	Geom         gazein.Geometry
+	KB           *selector.Keyboard
+	LM           *lm.Model
+	Log          *engine.Logger
+	Opt          Options
+	ModelPath    string
+	WordsPath    string // dizionario personale ("" = non si salva)
+	PhrasesPath  string // frasi imparate, una per riga ("" = non si salvano)
+	SettingsPath string // impostazioni che restano tra le sessioni ("" = non si salvano)
+	Task         string // compito dell'esercizio (metrics.TaskText o TaskStrict)
+	Source       string // "UDP 127.0.0.1:5005" o "simulazione"
+	VoiceInfo    string // la voce del tasto parla, per esempio "it_IT-serena-high (Piper, 22050 Hz, pw-play)"
+	VoiceErr     string // perché non c'è una voce
+	UDPStats     *gazein.Stats
+	ShotDir      string
 
 	// Calibrazione dello sguardo, eseguita dal driver tobii4c.
 	Driver     string // eseguibile del driver ("" = cercato)
@@ -447,6 +452,65 @@ func (a *App) toggle(k uint32) {
 		a.Opt.UseCorrector = !a.Opt.UseCorrector
 	}
 	a.Eng.SetToggles(a.Opt.UsePrediction, a.Opt.UsePupil, a.Opt.UseCorrector)
+}
+
+// Settings sono le scelte dell'utente che restano da una sessione all'altra.
+type Settings struct {
+	Speed string `json:"velocita"` // preset dei tempi delle lettere (selector.Speeds)
+}
+
+// LoadSettings legge le impostazioni salvate (vuote se il file manca).
+func LoadSettings(path string) Settings {
+	var s Settings
+	if path == "" {
+		return s
+	}
+	if b, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(b, &s); err != nil {
+			fmt.Fprintln(os.Stderr, "impostazioni:", err)
+		}
+	}
+	return s
+}
+
+func (a *App) saveSettings() {
+	if a.SettingsPath == "" {
+		return
+	}
+	b, _ := json.MarshalIndent(Settings{Speed: a.Opt.Speed}, "", "  ")
+	err := os.MkdirAll(filepath.Dir(a.SettingsPath), 0o755)
+	if err == nil {
+		err = os.WriteFile(a.SettingsPath, append(b, '\n'), 0o644)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "impostazioni:", err)
+	}
+}
+
+// cycleSpeed passa al preset successivo dei tempi delle lettere (dai tempi
+// personalizzati al primo) e lo ricorda per le sessioni successive. Vale
+// dalla scrittura libera o dall'esercizio successivi.
+func (a *App) cycleSpeed() {
+	i := -1
+	for j, s := range selector.Speeds {
+		if s.Name == a.Opt.Speed {
+			i = j
+		}
+	}
+	s := selector.Speeds[(i+1)%len(selector.Speeds)]
+	a.Opt.Speed, a.Opt.TMinMs, a.Opt.TMaxMs = s.Name, s.TMinMs, s.TMaxMs
+	a.Eng.SetTiming(s.TMinMs, s.TMaxMs)
+	a.Log.Event("speed", map[string]any{"speed": s.Name, "tmin_ms": s.TMinMs, "tmax_ms": s.TMaxMs})
+	a.saveSettings()
+}
+
+// speedLabel descrive i tempi delle lettere per il menu.
+func (a *App) speedLabel() string {
+	name := a.Opt.Speed
+	if name == "" {
+		name = "personalizzata"
+	}
+	return fmt.Sprintf("velocità delle lettere: %s (%s–%s ms)", name, it(a.Opt.TMinMs, 0), it(a.Opt.TMaxMs, 0))
 }
 
 // SaveUserWord aggiunge una parola al dizionario personale (una per riga).

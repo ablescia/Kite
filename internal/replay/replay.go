@@ -26,6 +26,11 @@
 // fedeltà (Result.Same). Nel compito "testo" la riproduzione è approssimata
 // (i suggerimenti mostrati allora non si ricostruiscono).
 //
+// Anche la scrittura libera si rigioca, come blocchi del compito "testo"
+// (condizione CondFree, "L"): ogni tratto di scrittura libera è un blocco, e
+// le selezioni che la persona ha poi cancellato contano come sbagliate. È il
+// dato più vicino all'uso reale di Kite.
+//
 // Legge le sessioni di Kite e quelle del banco di prova da cui Kite nasce,
 // che hanno lo stesso formato. Lì i blocchi "A" erano scritti con un dwell
 // fisso di 1 s: il loro sguardo, rigiocato con il selettore ibrido, dice
@@ -57,6 +62,7 @@ import (
 const (
 	CondDwell  = "A" // dwell fisso di 1 s: solo nelle sessioni del banco di prova
 	CondHybrid = engine.CondHybrid
+	CondFree   = "L" // scrittura libera
 )
 
 // Info sono i parametri della sessione (session.json). Le sessioni
@@ -76,7 +82,9 @@ type Info struct {
 	Bar      [4]float64            `json:"bar"`
 	Gap      float64               `json:"gap"`
 	EditBar  bool                  `json:"edit_bar"`
-	SpeakKey bool                  `json:"speak_key"` // barra con il tasto parla (dopo l'arrivo della voce)
+	// tolleranza dei tasti di modifica (assente nelle sessioni precedenti: 0)
+	EditMargin float64 `json:"edit_margin_deg"`
+	SpeakKey   bool    `json:"speak_key"` // barra con il tasto parla (dopo l'arrivo della voce)
 }
 
 // Row è un campione registrato, con i campi che servono al replay.
@@ -84,6 +92,7 @@ type Row struct {
 	DevUs      int64
 	Block      int
 	InBlock    bool
+	Free       bool // scrittura libera
 	Raw        [2]float64
 	RawValid   bool
 	Gaze       [2]float64
@@ -91,6 +100,7 @@ type Row struct {
 	Eye        [3]float64
 	PupilZ     float64
 	PupilValid bool
+	PupilComp  bool // pupilla compensata per la luminanza (previsione presente)
 	// dal rilevatore registrato: per sapere quando la persona ha lasciato un tasto
 	Saccade bool
 	FixID   uint64
@@ -122,6 +132,9 @@ type Block struct {
 	Phrase     string
 	Task       string
 	Compensate bool // modello pupillare valido (la pupilla poteva intervenire)
+	// parametri del selettore registrati all'inizio del blocco (nil nelle
+	// sessioni precedenti: valgono quelli di session.json)
+	Hybrid     *selector.HybridParams
 	Selections []Selection
 	Targets    []Target
 	First      int // indici dei campioni del blocco in Session.Rows
@@ -135,6 +148,16 @@ type Session struct {
 	Rows   []Row
 	Blocks []*Block
 	models map[string]*lm.Model
+	loose  []Selection // tutte le selezioni, per la scrittura libera
+	frees  []freeStart // inizi della scrittura libera registrati
+}
+
+// freeStart è l'inizio registrato di un tratto di scrittura libera.
+type freeStart struct {
+	DevUs      int64
+	Label      string
+	Compensate *bool
+	Hybrid     *selector.HybridParams
 }
 
 // Load legge una cartella di sessione.
@@ -183,6 +206,7 @@ func Load(dir string) (*Session, error) {
 			bl.Last = j
 		}
 	}
+	s.freeBlocks()
 	kept := s.Blocks[:0]
 	for _, bl := range s.Blocks {
 		if bl.First >= 0 {
@@ -280,13 +304,14 @@ func (s *Session) loadEvents(path string) error {
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
 		var ev struct {
-			Event  string `json:"event"`
-			Block  int    `json:"block"`
-			Cond   string `json:"cond"`
-			Label  string `json:"label"`
-			Phrase string `json:"phrase"`
-			Comp   bool   `json:"pupil_compensated"`
-			Task   string `json:"task"`
+			Event  string                 `json:"event"`
+			Block  int                    `json:"block"`
+			Cond   string                 `json:"cond"`
+			Label  string                 `json:"label"`
+			Phrase string                 `json:"phrase"`
+			Comp   *bool                  `json:"pupil_compensated"`
+			Task   string                 `json:"task"`
+			Hybrid *selector.HybridParams `json:"hybrid"`
 			Selection
 		}
 		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
@@ -294,10 +319,14 @@ func (s *Session) loadEvents(path string) error {
 		}
 		switch ev.Event {
 		case "block_start":
-			bl := &Block{ID: ev.Block, Cond: ev.Cond, Label: ev.Label, Phrase: ev.Phrase, Compensate: ev.Comp, Task: ev.Task}
+			bl := &Block{ID: ev.Block, Cond: ev.Cond, Label: ev.Label, Phrase: ev.Phrase, Compensate: ev.Comp != nil && *ev.Comp,
+				Task: ev.Task, Hybrid: ev.Hybrid}
 			byID[ev.Block] = bl
 			s.Blocks = append(s.Blocks, bl)
+		case "free_start":
+			s.frees = append(s.frees, freeStart{DevUs: ev.DevUs, Label: ev.Label, Compensate: ev.Comp, Hybrid: ev.Hybrid})
 		case "selection":
+			s.loose = append(s.loose, ev.Selection)
 			if bl := byID[ev.Block]; bl != nil {
 				bl.Selections = append(bl.Selections, ev.Selection)
 			}
@@ -339,10 +368,15 @@ func (s *Session) loadSamples(path string) error {
 		}
 		fl := func(n string) float64 { v, _ := strconv.ParseFloat(rec[col[n]], 64); return v }
 		in := func(n string) int64 { v, _ := strconv.ParseInt(rec[col[n]], 10, 64); return v }
+		comp := false
+		if _, ok := col["pupil_pred"]; ok {
+			comp = fl("pupil_pred") != 0
+		}
 		s.Rows = append(s.Rows, Row{
 			DevUs:      in("dev_us"),
 			Block:      int(in("block")),
 			InBlock:    rec[col["mode"]] == "block",
+			Free:       rec[col["mode"]] == "free",
 			Raw:        [2]float64{fl("rx"), fl("ry")},
 			RawValid:   rec[col["r_valid"]] == "1",
 			Gaze:       [2]float64{fl("gx"), fl("gy")},
@@ -350,6 +384,7 @@ func (s *Session) loadSamples(path string) error {
 			Eye:        [3]float64{fl("eye_x"), fl("eye_y"), fl("eye_z")},
 			PupilZ:     fl("pupil_z"),
 			PupilValid: rec[col["pupil_valid"]] == "1",
+			PupilComp:  comp,
 			Saccade:    rec[col["phase"]] == "saccade",
 			FixID:      uint64(in("fix_id")),
 		})
@@ -359,17 +394,22 @@ func (s *Session) loadSamples(path string) error {
 
 // Variant è un insieme di parametri da provare.
 type Variant struct {
-	Name   string
-	Hybrid selector.HybridParams
-	Sigma  float64
-	Core   float64
-	Eps    float64
-	LM     string // modello di lingua: "" quello della sessione, "base" o "italiano"
+	Name       string
+	Hybrid     selector.HybridParams
+	Sigma      float64
+	Core       float64
+	Eps        float64
+	EditMargin float64 // tolleranza dei tasti di modifica (gradi)
+	LM         string  // modello di lingua: "" quello della sessione, "base" o "italiano"
+	// PerBlock: i blocchi che hanno registrato i parametri del selettore
+	// (dopo l'arrivo dei preset di velocità) si rigiocano con quelli.
+	PerBlock bool
 }
 
 // Recorded è la variante con i parametri della sessione.
 func (s *Session) Recorded() Variant {
-	return Variant{Name: "registrato", Hybrid: s.Info.Hybrid, Sigma: s.Info.Sigma, Core: s.Info.Core, Eps: s.Info.Eps}
+	return Variant{Name: "registrato", Hybrid: s.Info.Hybrid, Sigma: s.Info.Sigma, Core: s.Info.Core, Eps: s.Info.Eps,
+		EditMargin: s.Info.EditMargin, PerBlock: true}
 }
 
 // Pick è una selezione del replay.
@@ -437,15 +477,25 @@ func (r *Result) Summarize() {
 	}
 }
 
-// ErrorCostS è il costo stimato di un errore: circa una selezione in più
-// (intervallo medio tra selezioni misurato nei blocchi B).
+// ErrorCostS è il costo stimato di un errore nella copiatura: circa una
+// selezione in più (intervallo medio tra selezioni misurato nei blocchi B).
 const ErrorCostS = 0.9
+
+// ErrorCostFreeS è il costo di un errore nella scrittura libera, dove va
+// visto e cancellato con lo sguardo: mediana misurata sulle sessioni del
+// 2026-11 (dalla lettera sbagliata alla successiva giusta, meno una lettera
+// normale, per cancella). La media è più del doppio.
+const ErrorCostFreeS = 3.9
 
 // NetS è la variazione stimata del tempo totale rispetto al log: anticipi e
 // ritardi delle lettere giuste più il costo degli errori in più o in meno.
 // Le lettere mancate senza stima non sono contate.
 func (r *Result) NetS() float64 {
-	return r.DeltaMs*float64(r.NDelta)/1000 + float64(r.Errors-r.LogError)*ErrorCostS
+	cost := ErrorCostS
+	if r.Cond == CondFree {
+		cost = ErrorCostFreeS
+	}
+	return r.DeltaMs*float64(r.NDelta)/1000 + float64(r.Errors-r.LogError)*cost
 }
 
 // Run rigioca la sessione con la variante v e restituisce i risultati per
@@ -459,7 +509,7 @@ func (s *Session) Run(v Variant) (map[string]*Result, error) {
 	model := s.Model(v.LM)
 	geom := s.Info.Geometry
 	det := oculo.New(oculo.DefaultConfig(), geom)
-	dec := &selector.Decoder{KB: kb, Geom: geom, SigmaDeg: v.Sigma, CoreFrac: v.Core, MarginDeg: 1}
+	dec := &selector.Decoder{KB: kb, Geom: geom, SigmaDeg: v.Sigma, CoreFrac: v.Core, MarginDeg: 1, EditMarginDeg: v.EditMargin}
 	res := map[string]*Result{}
 
 	bi := 0
@@ -494,6 +544,9 @@ func (s *Session) Run(v Variant) (map[string]*Result, error) {
 			// Le componenti attive nel blocco B sono nell'etichetta; lo
 			// sguardo dei blocchi A si rigioca con il selettore completo.
 			p := v.Hybrid
+			if v.PerBlock && bl.Hybrid != nil {
+				p = *bl.Hybrid
+			}
 			if bl.Cond != CondDwell {
 				p.UsePrediction = strings.Contains(bl.Label, "predizione")
 				if !strings.Contains(bl.Label, "pupilla") {
@@ -666,7 +719,7 @@ func (s *Session) Words(v Variant) ([]Word, error) {
 	}
 	geom := s.Info.Geometry
 	det := oculo.New(oculo.DefaultConfig(), geom)
-	dec := &selector.Decoder{KB: kb, Geom: geom, SigmaDeg: v.Sigma, CoreFrac: v.Core, MarginDeg: 1}
+	dec := &selector.Decoder{KB: kb, Geom: geom, SigmaDeg: v.Sigma, CoreFrac: v.Core, MarginDeg: 1, EditMarginDeg: v.EditMargin}
 	obsv := engine.NewObserver(dec, v.Hybrid)
 	type selAt struct {
 		bl  *Block
@@ -724,4 +777,113 @@ func (s *Session) Words(v Variant) ([]Word, error) {
 		}
 	}
 	return out, nil
+}
+
+// freeBlocks ricava i blocchi della scrittura libera: ogni tratto di
+// campioni in modalità "free" con le selezioni che vi cadono. Le stesse
+// selezioni escono dai blocchi di copiatura: nella scrittura libera il log
+// riporta l'id dell'ultimo blocco, e prima finivano lì.
+func (s *Session) freeBlocks() {
+	type seg struct{ t0, t1 int64 }
+	var segs []seg
+	n := 0
+	for i := 0; i < len(s.Rows); {
+		if !s.Rows[i].Free {
+			i++
+			continue
+		}
+		j := i
+		for j+1 < len(s.Rows) && s.Rows[j+1].Free {
+			j++
+		}
+		// l'ultima selezione (parla, o quella che chiude) può arrivare un
+		// campione dopo la fine del tratto
+		g := seg{s.Rows[i].DevUs, s.Rows[j].DevUs + 50_000}
+		segs = append(segs, g)
+		bl := &Block{ID: 1000 + n, Cond: CondFree, Label: engine.HybridLabel(true, true, true), Task: metrics.TaskText,
+			First: i, Last: j}
+		n++
+		for k := i; k <= j && !bl.Compensate; k++ {
+			bl.Compensate = s.Rows[k].PupilComp
+		}
+		// l'inizio registrato più recente: etichetta, pupilla e parametri
+		for _, f := range s.frees {
+			if f.DevUs <= g.t0 {
+				if f.Label != "" {
+					bl.Label = f.Label
+				}
+				if f.Compensate != nil {
+					bl.Compensate = *f.Compensate
+				}
+				bl.Hybrid = f.Hybrid
+			}
+		}
+		for _, sel := range s.loose {
+			if sel.DevUs >= g.t0 && sel.DevUs <= g.t1 {
+				bl.Selections = append(bl.Selections, sel)
+			}
+		}
+		markDeleted(bl.Selections)
+		if len(bl.Selections) > 0 {
+			s.Blocks = append(s.Blocks, bl)
+		}
+		i = j + 1
+	}
+	inFree := func(t int64) bool {
+		for _, g := range segs {
+			if t >= g.t0 && t <= g.t1 {
+				return true
+			}
+		}
+		return false
+	}
+	for _, bl := range s.Blocks {
+		if bl.Cond == CondFree {
+			continue
+		}
+		kept := bl.Selections[:0]
+		for _, sel := range bl.Selections {
+			if !inFree(sel.DevUs) {
+				kept = append(kept, sel)
+			}
+		}
+		bl.Selections = kept
+	}
+	sort.SliceStable(s.Blocks, func(a, b int) bool { return s.Blocks[a].First < s.Blocks[b].First })
+}
+
+// markDeleted segna come sbagliate le lettere e gli spazi che la persona ha
+// poi cancellato. Segue il testo dopo ogni selezione: una lettera o uno
+// spazio aggiungono un carattere, cancella toglie gli ultimi; le altre
+// modifiche (suggerimenti, correzioni, parla) riallineano senza segnare.
+func markDeleted(sels []Selection) {
+	var stack []int // selezione che ha scritto ciascun carattere (−1: ignota)
+	del := map[int]bool{}
+	for i, sel := range sels {
+		n := len([]rune(sel.Text))
+		switch sel.Kind {
+		case "lettera", "spazio":
+			stack = append(stack, i)
+			if len(stack) > n {
+				stack = stack[len(stack)-n:]
+			}
+		case "canc":
+			for len(stack) > n {
+				if k := stack[len(stack)-1]; k >= 0 {
+					del[k] = true
+				}
+				stack = stack[:len(stack)-1]
+			}
+		default:
+			if len(stack) > n {
+				stack = stack[:n]
+			}
+			for len(stack) < n {
+				stack = append([]int{-1}, stack...)
+			}
+		}
+	}
+	for i := range sels {
+		sels[i].Correct = !del[i]
+	}
 }
