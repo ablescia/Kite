@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Antonio Blescia
 
 // Kite: tastiera a sguardo ibrida per la comunicazione aumentativa e
 // alternativa, con il Tobii Eye Tracker 4C su Linux. Il tasto si attiva

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Antonio Blescia
 
 // Package oculo separa in tempo reale le saccadi dalle fissazioni sullo
 // stream a 90 Hz (un campione ogni ~11 ms).

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Antonio Blescia
 
 // Package gazein riceve i campioni del driver tobii4c (datagrammi UDP T4CG
 // v2, 192 byte little-endian, uno ogni ~11 ms a 90 Hz) e fornisce la

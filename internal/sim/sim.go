@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Antonio Blescia
 
 // Package sim è un utente simulato che genera campioni come il driver
 // (90 Hz) guardando ciò che Kite gli chiede. Serve a provare

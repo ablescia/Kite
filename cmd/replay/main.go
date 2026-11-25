@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Antonio Blescia
 
 // kite-replay rigioca le sessioni registrate (di Kite e del banco di prova da
 // cui Kite nasce) attraverso il selettore ibrido, con i parametri registrati
@@ -34,10 +35,9 @@ type entry struct {
 
 func main() {
 	home, _ := os.UserHomeDir()
-	defRoots := filepath.Join(home, ".local/share/tobii4c-hybridbci/sessions") + "," +
-		filepath.Join(home, ".local/share/kite/sessions")
+	defRoots := filepath.Join(home, ".local/share/kite/sessions")
 	root := flag.String("sessions", defRoots,
-		"cartelle delle sessioni, separate da virgole: senza argomenti si rigiocano tutte (prima quelle del banco di prova, poi quelle di Kite)")
+		"cartelle delle sessioni, separate da virgole: senza argomenti si rigiocano tutte, nell'ordine indicato")
 	suite := flag.Bool("suite", false, "prova le correzioni una alla volta e alcune varianti dei parametri")
 	verbose := flag.Bool("v", false, "elenca le selezioni sbagliate (registrato e attuale)")
 	corrMode := flag.Bool("correttore", false, "valuta il correttore sulle parole copiate, con gli errori come sarebbero entrati nel testo")

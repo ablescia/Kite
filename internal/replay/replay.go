@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Antonio Blescia
 
 // Package replay rigioca una sessione registrata (session.json, samples.csv,
 // events.jsonl) attraverso il rilevatore di saccadi e il selettore ibrido con

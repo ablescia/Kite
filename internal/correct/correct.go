@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Antonio Blescia
 
 // Package correct è il correttore automatico italiano: a fine parola sceglie
 // la parola più probabile date le lettere selezionate con lo sguardo, come

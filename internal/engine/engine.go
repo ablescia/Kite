@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Antonio Blescia
 
 // Package engine elabora lo stream dello sguardo in una goroutine dedicata,
 // campione per campione (90 Hz), indipendentemente dal disegno

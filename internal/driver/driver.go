@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Antonio Blescia
 
 // Package driver usa il driver tobii4c (github.com/ablescia/tobii4c-linux)
 // per l'unica cosa che Kite non fa da sé: la calibrazione dello sguardo.

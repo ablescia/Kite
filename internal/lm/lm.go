@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Antonio Blescia
 
 // Package lm è il modello probabilistico che guida l'espansione invisibile
 // dei bersagli: dato il testo già scritto, restituisce la probabilità di

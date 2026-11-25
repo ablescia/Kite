@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Antonio Blescia
 
 // Package ngram predice il resto della frase che si sta scrivendo, con un
 // modello a n-grammi di parole imparato dalle frasi che l'utente dice.
