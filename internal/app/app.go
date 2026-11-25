@@ -617,7 +617,7 @@ func (a *App) trackerStatus() (string, color.RGBA) {
 		if a.Source == "simulazione" {
 			return "simulazione in avvio…", colWarn
 		}
-		return "nessun dato dal driver: avvialo («tobii4c run -headpose off», o il servizio tobii4c)", colBad
+		return "nessun dato dal driver: avvia il servizio tobii4c, o «tobii4c run -headpose off -display-mm saved -calibration saved»", colBad
 	}
 	if s.Presence == 1 || !s.EyeValid {
 		return fmt.Sprintf("%s Hz · occhi non tracciati: siediti davanti al sensore", it(s.RateHz, 0)), colWarn

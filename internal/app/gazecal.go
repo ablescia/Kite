@@ -114,7 +114,8 @@ func (g *gazeCal) statusLines(a *App) []statusLine {
 	case a.receiving():
 		add(colWarn, "Kite riceve i dati ma non trova il programma che tiene il tracker: se il driver dice che è occupato, chiudilo e riprova.")
 	default:
-		add(colDim, "Nessun driver in esecuzione: dopo la calibrazione avvialo («tobii4c run -headpose off» o il servizio).")
+		add(colDim, "Nessun driver in esecuzione: dopo la calibrazione avvia il servizio tobii4c,")
+		add(colDim, "oppure a mano «tobii4c run -headpose off -display-mm saved -calibration saved».")
 	}
 	var info []string
 	if !st.LastCal.IsZero() {
@@ -304,8 +305,8 @@ func (g *gazeCal) drawResult(a *App, img *image.RGBA) {
 		x11ui.Text(img, a.F.Body, cx, y, "Servizio "+strings.Join(r.Restarted, ", ")+" riavviato.", colOK, x11ui.Center)
 		y += a.Px(46)
 	case r.Err == nil:
-		x11ui.Text(img, a.F.Body, cx, y, "Se il driver non è in esecuzione, avvialo: «tobii4c run -headpose off».", colDim, x11ui.Center)
-		y += a.Px(46)
+		y = a.paragraph(img, a.F.Body, cx, y, a.Px(1300), "Se il driver non è in esecuzione, avvia il servizio tobii4c, "+
+			"oppure a mano «tobii4c run -headpose off -display-mm saved -calibration saved».", colDim, x11ui.Center)
 	}
 	if g.newGeom(a) {
 		msg := fmt.Sprintf("Lo schermo misurato dal driver (%s × %s mm) è diverso da quello che Kite usa (%s × %s mm).",
